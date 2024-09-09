@@ -803,6 +803,8 @@ void StartDefaultTask(void *argument)
 	} else {
 		printf("BMM350 initialization complete!\r\n");
 	}
+	bmm350_enable_axes(BMM350_X_EN, BMM350_Y_EN, BMM350_Z_EN, &bmm350);
+	bmm350_set_powermode(BMM350_NORMAL_MODE, &bmm350);
 
 	/* Setup BNO055 (on qwiic port) */
 	bno055.bus_read = &stm32_bno055_bus_read;
@@ -830,10 +832,18 @@ void StartDefaultTask(void *argument)
 
 	osDelay(pdMS_TO_TICKS(1000));
 
+	struct bmm350_mag_temp_data mag_temp_data;
   /* Infinite loop */
   for(;;)
   {
 	  HAL_GPIO_TogglePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin);
+	  bmm350_res = bmm350_get_compensated_mag_xyz_temp_data(&mag_temp_data, &bmm350);
+  	  if (bmm350_res != 0) {
+		  printf("BMM350 get data failed: %d\r\n", bmm350_res);
+	  } else {
+		  printf("BMM350 temperature is %f\r\n", mag_temp_data.temperature);
+	  }
+
       osDelay(pdMS_TO_TICKS(500));
   }
   /* USER CODE END 5 */
@@ -848,6 +858,12 @@ void Error_Handler(void)
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
+
+  /* Set indicator LED to red */
+  HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_SET);
+
   while (1)
   {
   }
