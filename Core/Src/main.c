@@ -31,6 +31,9 @@
 #include "bmm350.h"
 #include "bmi08x.h"
 #include "bno055.h"
+#include "dynamixel.h"
+#include "dynamixel_ll_uart.h"
+#include "pose.h"
 
 /* USER CODE END Includes */
 
@@ -75,12 +78,14 @@ TIM_HandleTypeDef htim1;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart6;
+DMA_HandleTypeDef hdma_usart6_tx;
+DMA_HandleTypeDef hdma_usart6_rx;
 
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 128 * 4,
+  .stack_size = 128 * 16,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* USER CODE BEGIN PV */
@@ -94,11 +99,18 @@ bmi08_t bmi088;
 i2c_intf_ptr bno055_intf;
 bno055_tt bno055;
 
+dynamixel_ll_uart_context dynamixel_uart_context;
+dynamixel_bus_t dynamixel_bus;
+dynamixel_servo_t dynamixel_servo;
+
+volatile osThreadId_t servoCallbackThreadId;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_I2C3_Init(void);
@@ -160,6 +172,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_I2C1_Init();
   MX_I2C2_Init();
   MX_I2C3_Init();
@@ -534,7 +547,7 @@ static void MX_USART6_UART_Init(void)
 
   /* USER CODE END USART6_Init 1 */
   huart6.Instance = USART6;
-  huart6.Init.BaudRate = 115200;
+  huart6.Init.BaudRate = 57600;
   huart6.Init.WordLength = UART_WORDLENGTH_8B;
   huart6.Init.StopBits = UART_STOPBITS_1;
   huart6.Init.Parity = UART_PARITY_NONE;
@@ -548,6 +561,25 @@ static void MX_USART6_UART_Init(void)
   /* USER CODE BEGIN USART6_Init 2 */
 
   /* USER CODE END USART6_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA2_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA2_Stream1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream1_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
+  /* DMA2_Stream6_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream6_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream6_IRQn);
 
 }
 
@@ -733,6 +765,23 @@ void stm32_bno055_delay_us(u32 period) {
 	while (__HAL_TIM_GET_COUNTER(&htim1) < period);  // wait for the counter to reach the us input in the parameter
 }
 
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+	if (huart == &huart6 && servoCallbackThreadId != 0) {
+		osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_TX_CPLT);
+	}
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+	if (huart == &huart6 && servoCallbackThreadId != 0) {
+		osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_RX_CPLT);
+	}
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+	if (huart == &huart6 && servoCallbackThreadId != 0) {
+		osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_ERR);
+	}
+}
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -818,6 +867,23 @@ void StartDefaultTask(void *argument)
 		printf("BNO055 initialization complete!\r\n");
 	}
 
+	dynamixel_uart_context.huart = &huart6;
+	dynamixel_uart_context.callerThread = osThreadGetId();
+	dynamixel_bus.readFunc = &dynamixel_read_uart_dma;
+	dynamixel_bus.writeFunc = &dynamixel_write_uart_dma;
+	dynamixel_bus.pvContext = &dynamixel_uart_context;
+
+	dynamixel_servo.bus = &dynamixel_bus;
+	dynamixel_servo.id = 0x01;
+	dynamixel_servo.type = DYNAMIXEL_XL430;
+
+	dynamixel_result_t dmn_res = dynamixel_ping(&dynamixel_servo);
+	if (dmn_res != DNM_OK) {
+		printf("Dynamixel ping failed: %d\r\n", dmn_res);
+	} else {
+		printf("Dynamixel with id 0x1 OK\r\n");
+	}
+
 	HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_RESET);
 	osDelay(pdMS_TO_TICKS(1000));
 	HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_SET);
@@ -833,7 +899,14 @@ void StartDefaultTask(void *argument)
 	osDelay(pdMS_TO_TICKS(1000));
 
 	struct bmm350_mag_temp_data mag_temp_data;
+	uint8_t state = 0;
   /* Infinite loop */
+
+	pose_t hexapod = {
+			.x = 0,
+			;
+	};
+
   for(;;)
   {
 	  HAL_GPIO_TogglePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin);
@@ -843,6 +916,15 @@ void StartDefaultTask(void *argument)
 	  } else {
 		  printf("BMM350 temperature is %f\r\n", mag_temp_data.temperature);
 	  }
+
+  	  if (state) {
+  		  dynamixel_led_set(&dynamixel_servo);
+  	  } else {
+  		  dynamixel_led_reset(&dynamixel_servo);
+  	  }
+  	  state = !state;
+
+  	  s
 
       osDelay(pdMS_TO_TICKS(500));
   }
@@ -861,7 +943,7 @@ void Error_Handler(void)
 
   /* Set indicator LED to red */
   HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_SET);
 
   while (1)
