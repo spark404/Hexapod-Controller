@@ -33,7 +33,6 @@
 #include "bno055.h"
 #include "dynamixel.h"
 #include "dynamixel_ll_uart.h"
-#include "pose.h"
 
 /* USER CODE END Includes */
 
@@ -717,7 +716,7 @@ BMI08_INTF_RET_TYPE stm32_bmi08_write(uint8_t reg_addr, const uint8_t *reg_data,
 	HAL_SPI_Transmit(spi_intf->hspi, &reg_addr, 1, 50);
 	while(HAL_SPI_GetState(spi_intf->hspi) == HAL_SPI_STATE_BUSY);
 
-	HAL_SPI_Transmit(spi_intf->hspi, reg_data, len, 50);
+	HAL_SPI_Transmit(spi_intf->hspi, (uint8_t *)reg_data, len, 50);
 	while(HAL_SPI_GetState(spi_intf->hspi) == HAL_SPI_STATE_BUSY);
 
 	HAL_GPIO_WritePin(spi_intf->CS_Port, spi_intf->CS_Pin, GPIO_PIN_SET);
@@ -860,7 +859,7 @@ void StartDefaultTask(void *argument)
 	bno055.bus_write = &stm32_bno055_bus_write;
 	bno055.delay_msec = &stm32_bno055_delay_us;
 	bno055.dev_addr = 0x28;
-	int bno055_res = bno055_init(&bno055);
+	s8 bno055_res = bno055_init(&bno055);
 	if (bno055_res != 0) {
 		printf("BNO055 initialization failed: %d\r\n", bno055_res);
 	} else {
@@ -869,15 +868,11 @@ void StartDefaultTask(void *argument)
 
 	dynamixel_uart_context.huart = &huart6;
 	dynamixel_uart_context.callerThread = osThreadGetId();
-	dynamixel_bus.readFunc = &dynamixel_read_uart_dma;
-	dynamixel_bus.writeFunc = &dynamixel_write_uart_dma;
-	dynamixel_bus.pvContext = &dynamixel_uart_context;
 
-	dynamixel_servo.bus = &dynamixel_bus;
-	dynamixel_servo.id = 0x01;
-	dynamixel_servo.type = DYNAMIXEL_XL430;
+    dynamixel_bus_init(dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, &dynamixel_uart_context);
+    dynamixel_init(dynamixel_servo, 0x01, DYNAMIXEL_XL430, dynamixel_bus);
 
-	dynamixel_result_t dmn_res = dynamixel_ping(&dynamixel_servo);
+    dynamixel_result_t dmn_res = dynamixel_ping(dynamixel_servo);
 	if (dmn_res != DNM_OK) {
 		printf("Dynamixel ping failed: %d\r\n", dmn_res);
 	} else {
@@ -902,11 +897,6 @@ void StartDefaultTask(void *argument)
 	uint8_t state = 0;
   /* Infinite loop */
 
-	pose_t hexapod = {
-			.x = 0,
-			;
-	};
-
   for(;;)
   {
 	  HAL_GPIO_TogglePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin);
@@ -918,13 +908,11 @@ void StartDefaultTask(void *argument)
 	  }
 
   	  if (state) {
-  		  dynamixel_led_set(&dynamixel_servo);
+  		  dynamixel_led_set(dynamixel_servo);
   	  } else {
-  		  dynamixel_led_reset(&dynamixel_servo);
+  		  dynamixel_led_reset(dynamixel_servo);
   	  }
   	  state = !state;
-
-  	  s
 
       osDelay(pdMS_TO_TICKS(500));
   }

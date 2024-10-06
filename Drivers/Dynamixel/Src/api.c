@@ -1,11 +1,12 @@
 #include "dynamixel.h"
+#include "dynamixel_internal.h"
 #include "protocol.h"
 #include "api.h"
 #include "crc.h"
 
 #include <stddef.h>
 
-dynamixel_result_t dynamixel_ll_ping(uint8_t identifier, dynamixel_bus_t *bus) {
+dynamixel_result_t dynamixel_ll_ping(uint8_t identifier, dynamixel_bus_t bus) {
 	if (bus == NULL) {
 		return DNM_API_ERR;
 	}
@@ -42,7 +43,7 @@ dynamixel_result_t dynamixel_ll_ping(uint8_t identifier, dynamixel_bus_t *bus) {
 	return DNM_OK;
 }
 
-dynamixel_result_t dynamixel_write(uint8_t identifier, uint16_t entry, uint8_t value, dynamixel_bus_t *bus) {
+dynamixel_result_t dynamixel_write(uint8_t identifier, uint16_t entry, uint8_t value, dynamixel_bus_t bus) {
 	if (bus == NULL) {
 		return DNM_API_ERR;
 	}
@@ -100,7 +101,7 @@ dynamixel_result_t dynamixel_write(uint8_t identifier, uint16_t entry, uint8_t v
 	return DNM_OK;
 }
 
-dynamixel_result_t dynamixel_write2(uint8_t identifier, uint16_t entry, uint16_t value, dynamixel_bus_t *bus) {
+dynamixel_result_t dynamixel_write2(uint8_t identifier, uint16_t entry, uint16_t value, dynamixel_bus_t bus) {
 	if (bus == NULL) {
 		return DNM_API_ERR;
 	}
@@ -118,7 +119,7 @@ dynamixel_result_t dynamixel_write2(uint8_t identifier, uint16_t entry, uint16_t
 	packet[9] = (entry >> 8) & 0xFF;
 
 	packet[10] = value & 0xFF;
-	packet[11] = (value >> 8) && 0xFF;
+	packet[11] = (value >> 8) & 0xFF;
 
 	uint16_t crc = update_crc(0, packet, len-2);
 	packet[len-2] = crc & 0xFF;
@@ -159,7 +160,7 @@ dynamixel_result_t dynamixel_write2(uint8_t identifier, uint16_t entry, uint16_t
 	return DNM_OK;
 }
 
-dynamixel_result_t dynamixel_write4(uint8_t identifier, uint16_t entry, uint32_t value, dynamixel_bus_t *bus) {
+dynamixel_result_t dynamixel_write4(uint8_t identifier, uint16_t entry, uint32_t value, dynamixel_bus_t bus) {
 	if (bus == NULL) {
 		return DNM_API_ERR;
 	}
@@ -220,7 +221,7 @@ dynamixel_result_t dynamixel_write4(uint8_t identifier, uint16_t entry, uint32_t
 	return DNM_OK;
 }
 
-dynamixel_result_t dynamixel_read(uint8_t identifier, uint16_t entry, uint8_t entry_size, uint32_t *value, dynamixel_bus_t *bus) {
+dynamixel_result_t dynamixel_read(uint8_t identifier, uint16_t entry, uint8_t entry_size, uint32_t *value, dynamixel_bus_t bus) {
 	if (bus == NULL) {
 		return DNM_API_ERR;
 	}
@@ -253,7 +254,7 @@ dynamixel_result_t dynamixel_read(uint8_t identifier, uint16_t entry, uint8_t en
 		return r;
 	}
 
-	uint8_t rxBuffer[11];
+	uint8_t rxBuffer[13];
 	uint16_t n = 11;
 
 	r = bus->readFunc(rxBuffer, n, bus->pvContext);

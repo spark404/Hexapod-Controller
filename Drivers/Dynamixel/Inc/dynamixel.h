@@ -21,21 +21,15 @@ typedef uint8_t dynamixel_result_t;
 typedef dynamixel_result_t (*dynamixelWriteFunc_t) (uint8_t *txBuffer, size_t size, void *pvArgument);
 typedef dynamixel_result_t (*dynamixelReadFunc_t) (uint8_t *rxBuffer, size_t size, void *pvArgument);
 
-typedef struct {
-	dynamixelWriteFunc_t writeFunc;
-	dynamixelReadFunc_t readFunc;
-	void *pvContext;
-} dynamixel_bus_t;
+typedef struct dynamixel_bus *dynamixel_bus_t;
 
-typedef struct {
-	uint8_t id;
-	uint8_t type;
-	uint8_t initialized;
-	dynamixel_bus_t *bus;
-} dynamixel_servo_t;
+dynamixel_result_t dynamixel_bus_init(dynamixel_bus_t bus, dynamixelReadFunc_t readFunc, dynamixelWriteFunc_t writeFunc, void *pvContext);
 
-dynamixel_result_t dynamixel_ping(dynamixel_servo_t *servo);
-dynamixel_result_t dynamixel_led_set(dynamixel_servo_t *servo);
-dynamixel_result_t dynamixel_led_reset(dynamixel_servo_t *servo);
+typedef struct dynamixel_servo *dynamixel_servo_t;
+
+dynamixel_result_t dynamixel_init(dynamixel_servo_t servo, uint8_t id, uint8_t type, dynamixel_bus_t bus);
+dynamixel_result_t dynamixel_ping(dynamixel_servo_t servo);
+dynamixel_result_t dynamixel_led_set(dynamixel_servo_t servo);
+dynamixel_result_t dynamixel_led_reset(dynamixel_servo_t servo);
 
 #endif /* DYNAMIXEL_H */
