@@ -1,7 +1,7 @@
 #THIS FILE IS AUTO GENERATED FROM THE TEMPLATE! DO NOT CHANGE!
 set(CMAKE_SYSTEM_NAME Generic)
 set(CMAKE_SYSTEM_VERSION 1)
-cmake_minimum_required(VERSION 3.29)
+cmake_minimum_required(VERSION 3.31)
 
 # specify cross-compilers and tools
 set(CMAKE_C_COMPILER arm-none-eabi-gcc)
@@ -18,6 +18,8 @@ project(Hexapod C CXX ASM)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_C_STANDARD 11)
 
+include(FetchContent)
+
 #Uncomment for hardware floating point
 add_compile_definitions(ARM_MATH_CM4;ARM_MATH_MATRIX_CHECK;ARM_MATH_ROUNDING)
 add_compile_options(-mfloat-abi=hard -mfpu=fpv4-sp-d16)
@@ -26,7 +28,7 @@ add_link_options(-mfloat-abi=hard -mfpu=fpv4-sp-d16)
 #Uncomment for software floating point
 #add_compile_options(-mfloat-abi=soft)
 
-add_compile_options(-mcpu=Cortex-M4 -std=gnu11 --specs=nano.specs -mthumb  -Wall -Werror)
+add_compile_options(-mcpu=cortex-m4 -mthumb -mthumb-interwork)
 add_compile_options(-ffunction-sections -fdata-sections -fno-common -fmessage-length=0)
 
 # uncomment to mitigate c++17 absolute addresses warnings
@@ -49,22 +51,33 @@ else ()
     add_compile_options(-Og -g)
 endif ()
 
-include_directories(Core/Inc
-        Drivers/STM32F4xx_HAL_Driver/Inc
-        Drivers/STM32F4xx_HAL_Driver/Inc/Legacy
-        Drivers/CMSIS/Device/ST/STM32F4xx/Include
-        Drivers/CMSIS/Include
-        Drivers/BMM350/Inc
-        Drivers/BMI08X/Inc
-        Drivers/BNO055/Inc
-        Drivers/Dynamixel/Inc
-        Drivers/Dynamixel/PrivateInc
-        Middlewares/Third_Party/FreeRTOS/Source/include
-        Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2
-        Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F
-        Middlewares/HexapodMath/Inc
-        Middlewares/HexapodMath/PrivateInc
+set(CMSISCORE ${CMAKE_SOURCE_DIR}/Drivers/CMSIS)
+FetchContent_Declare(
+        cmsis-dsp
+        GIT_REPOSITORY https://github.com/ARM-software/CMSIS-DSP
+        GIT_TAG main
 )
+FetchContent_MakeAvailable(cmsis-dsp)
+
+FetchContent_Declare(
+        HexapodMath
+        GIT_REPOSITORY git@github.com:spark404/HexapodMath
+        GIT_TAG "81c8630e381275a9198f712b9919335291fdc18c"
+        GIT_PROGRESS ON
+        GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
+)
+FetchContent_MakeAvailable(HexapodMath)
+
+FetchContent_Declare(
+        dynamixel
+        GIT_REPOSITORY git@github.com:spark404/dynamixel
+        GIT_TAG "ae98a297e06721cdb6120242a43a0e0355c71f44"
+        GIT_PROGRESS ON
+        GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
+)
+FetchContent_MakeAvailable(dynamixel)
+
+include_directories(Core/Inc Drivers/STM32F4xx_HAL_Driver/Inc Drivers/STM32F4xx_HAL_Driver/Inc/Legacy Drivers/CMSIS/Device/ST/STM32F4xx/Include Drivers/CMSIS/Include Drivers/CMSIS_DSP/Include Drivers/BMM350/Inc Drivers/BMI08X/Inc Drivers/BNO055/Inc Drivers/Dynamixel/Inc Drivers/Dynamixel/PrivateInc Middlewares/Third_Party/FreeRTOS/Source/include Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2 Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F Middlewares/HexapodMath/Inc)
 
 add_definitions(-DDEBUG -DUSE_HAL_DRIVER -DSTM32F401xE)
 
@@ -72,18 +85,14 @@ file(GLOB_RECURSE SOURCES "Core/*.*" "Middlewares/*.*" "Drivers/*.*")
 
 set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/STM32F401RETX_FLASH.ld)
 
-add_link_options(-Wl,--gc-sections,-static,--print-memory-usage,-Map=${PROJECT_BINARY_DIR}/${PROJECT_NAME}.map)
-add_link_options(-mcpu=cortex-m4 --specs=nosys.specs )
-add_link_options(-Wl,--start-group -lc -lm -Wl,--end-group)
+add_link_options(-Wl,-gc-sections,--print-memory-usage,-Map=${PROJECT_BINARY_DIR}/${PROJECT_NAME}.map)
+add_link_options(-mcpu=cortex-m4 -mthumb -mthumb-interwork)
 add_link_options(-T ${LINKER_SCRIPT})
 
-set(CMSISDSP /Users/hugo/Projects/CMSIS-DSP)
-set(CMSISCORE ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/CMSIS)
-add_subdirectory(${CMSISDSP}/Source bin_dsp)
-link_directories(${PROJECT_BINARY_DIR}/bin_dsp)
-link_libraries(CMSISDSP)
-
 add_executable(${PROJECT_NAME}.elf ${SOURCES} ${LINKER_SCRIPT})
+
+add_dependencies(${PROJECT_NAME}.elf CMSISDSP HexapodMath dynamixel)
+target_link_libraries(${PROJECT_NAME}.elf dynamixel CMSISDSP HexapodMath)
 
 set(HEX_FILE ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.hex)
 set(BIN_FILE ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.bin)

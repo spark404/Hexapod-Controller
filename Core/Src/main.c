@@ -31,7 +31,7 @@
 #include "bmm350.h"
 #include "bmi08x.h"
 #include "bno055.h"
-#include "dynamixel.h"
+#include "dynamixel/dynamixel.h"
 #include "dynamixel_ll_uart.h"
 
 /* USER CODE END Includes */
@@ -869,10 +869,10 @@ void StartDefaultTask(void *argument)
 	dynamixel_uart_context.huart = &huart6;
 	dynamixel_uart_context.callerThread = osThreadGetId();
 
-    dynamixel_bus_init(dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, &dynamixel_uart_context);
-    dynamixel_init(dynamixel_servo, 0x01, DYNAMIXEL_XL430, dynamixel_bus);
+    dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, &dynamixel_uart_context);
+    dynamixel_init(&dynamixel_servo, 0x01, DYNAMIXEL_XL430, &dynamixel_bus);
 
-    dynamixel_result_t dmn_res = dynamixel_ping(dynamixel_servo);
+    dynamixel_result_t dmn_res = dynamixel_ping(&dynamixel_servo);
 	if (dmn_res != DNM_OK) {
 		printf("Dynamixel ping failed: %d\r\n", dmn_res);
 	} else {
@@ -908,9 +908,9 @@ void StartDefaultTask(void *argument)
 	  }
 
   	  if (state) {
-  		  dynamixel_led_set(dynamixel_servo);
+  		  dynamixel_set_led(&dynamixel_servo, 1);
   	  } else {
-  		  dynamixel_led_reset(dynamixel_servo);
+  		  dynamixel_set_led(&dynamixel_servo, 0);
   	  }
   	  state = !state;
 

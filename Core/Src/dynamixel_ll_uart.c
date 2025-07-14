@@ -3,7 +3,7 @@
 // Bit of a hack, but we need to know which thread to get back to
 extern osThreadId_t servoCallbackThreadId;
 
-dynamixel_result_t dynamixel_write_uart_dma(uint8_t *txBuffer, size_t size, void *pvContext) {
+ssize_t dynamixel_write_uart_dma(const uint8_t *txBuffer, size_t size, void *pvContext) {
 	if (pvContext == NULL) {
 		return DNM_LL_ERR;
 	}
@@ -34,7 +34,7 @@ dynamixel_result_t dynamixel_write_uart_dma(uint8_t *txBuffer, size_t size, void
 	return DNM_OK;
 }
 
-dynamixel_result_t dynamixel_read_uart_dma(uint8_t *rxBuffer, size_t size, void *pvContext) {
+ssize_t dynamixel_read_uart_dma(uint8_t *rxBuffer, size_t size, void *pvContext) {
 	if (pvContext == NULL) {
 		return DNM_LL_ERR;
 	}
