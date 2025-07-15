@@ -100,7 +100,7 @@ bno055_tt bno055;
 
 dynamixel_ll_uart_context dynamixel_uart_context;
 dynamixel_bus_t dynamixel_bus;
-dynamixel_servo_t dynamixel_servo;
+dynamixel_servo_t dynamixel_servo[3];
 
 volatile osThreadId_t servoCallbackThreadId;
 
@@ -870,13 +870,17 @@ void StartDefaultTask(void *argument)
 	dynamixel_uart_context.callerThread = osThreadGetId();
 
     dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, &dynamixel_uart_context);
-    dynamixel_init(&dynamixel_servo, 0x01, DYNAMIXEL_XL430, &dynamixel_bus);
+    dynamixel_init(&dynamixel_servo[0], 0x01, DYNAMIXEL_XL430, &dynamixel_bus);
+	dynamixel_init(&dynamixel_servo[1], 0x02, DYNAMIXEL_XL430, &dynamixel_bus);
+	dynamixel_init(&dynamixel_servo[2], 0x03, DYNAMIXEL_XL430, &dynamixel_bus);
 
-    dynamixel_result_t dmn_res = dynamixel_ping(&dynamixel_servo);
-	if (dmn_res != DNM_OK) {
-		printf("Dynamixel ping failed: %d\r\n", dmn_res);
-	} else {
-		printf("Dynamixel with id 0x1 OK\r\n");
+	for (int i = 0; i < 3; i++) {
+		dynamixel_result_t dmn_res = dynamixel_ping(&dynamixel_servo[i]);
+		if (dmn_res != DNM_OK) {
+			printf("Dynamixel servo with id %d ping failed: %d\r\n", dynamixel_servo[i].id, dmn_res);
+		} else {
+			printf("Dynamixel servo with id %d OK\r\n", dynamixel_servo[i].id);
+		}
 	}
 
 	HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_RESET);
