@@ -5,7 +5,7 @@ extern osThreadId_t servoCallbackThreadId;
 
 ssize_t dynamixel_write_uart_dma(const uint8_t *txBuffer, size_t size, void *pvContext) {
 	if (pvContext == NULL) {
-		return DNM_LL_ERR;
+		return -1;
 	}
 
 	dynamixel_ll_uart_context *context = (dynamixel_ll_uart_context *)pvContext;
@@ -17,26 +17,26 @@ ssize_t dynamixel_write_uart_dma(const uint8_t *txBuffer, size_t size, void *pvC
 	// Enable the transmitter and start the DMA transfer
 	HAL_HalfDuplex_EnableTransmitter(huart);
 	if (HAL_UART_Transmit_DMA(huart, txBuffer, size) != HAL_OK) {
-		return DNM_LL_ERR;
+		return -1;
 	}
 
 	// Wait for the TX complete flag
 	uint32_t flags = osThreadFlagsWait(DYNAMIXEL_DMA_TX_CPLT | DYNAMIXEL_DMA_ERR, osFlagsWaitAny, pdMS_TO_TICKS(50));
 
 	if (flags == (uint32_t)osErrorTimeout) {
-		return DNM_LL_TIMEOUT;
+		return -1;
 	}
 
 	if (flags != DYNAMIXEL_DMA_TX_CPLT) {
-		return DNM_LL_ERR;
+		return -1;
 	}
 
-	return DNM_OK;
+	return size;
 }
 
 ssize_t dynamixel_read_uart_dma(uint8_t *rxBuffer, size_t size, void *pvContext) {
 	if (pvContext == NULL) {
-		return DNM_LL_ERR;
+		return -1;
 	}
 
 	dynamixel_ll_uart_context *context = (dynamixel_ll_uart_context *)pvContext;
@@ -47,8 +47,8 @@ ssize_t dynamixel_read_uart_dma(uint8_t *rxBuffer, size_t size, void *pvContext)
 
 	// Enable the transmitter and start the DMA transfer
 	HAL_HalfDuplex_EnableReceiver(huart);
-	if (HAL_UART_Receive_DMA(huart, rxBuffer, 14) != HAL_OK) {
-		return DNM_LL_ERR;
+	if (HAL_UART_Receive_DMA(huart, rxBuffer, size) != HAL_OK) {
+		return -1;
 	}
 
 	// Wait for the RX complete flag
@@ -56,14 +56,19 @@ ssize_t dynamixel_read_uart_dma(uint8_t *rxBuffer, size_t size, void *pvContext)
 
 	if (flags == (uint32_t)osErrorTimeout) {
 		HAL_UART_DMAStop(huart);
-		return DNM_LL_TIMEOUT;
+		return -1;
+	}
+
+	if (flags == (uint32_t)osErrorResource) {
+		HAL_UART_DMAStop(huart);
+		return -1;
 	}
 
 	if (flags != DYNAMIXEL_DMA_RX_CPLT) {
 		HAL_UART_DMAStop(huart);
-		return DNM_LL_ERR;
+		return -1;
 	}
 
 	HAL_UART_DMAStop(huart);
-	return DNM_OK;
+	return size;
 }

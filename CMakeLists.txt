@@ -13,6 +13,8 @@ set(CMAKE_OBJDUMP arm-none-eabi-objdump)
 set(SIZE arm-none-eabi-size)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
+set(CMAKE_MESSAGE_LOG_LEVEL DEBUG)
+
 # project settings
 project(Hexapod C CXX ASM)
 set(CMAKE_CXX_STANDARD 17)
@@ -71,7 +73,7 @@ FetchContent_MakeAvailable(HexapodMath)
 FetchContent_Declare(
         dynamixel
         GIT_REPOSITORY git@github.com:spark404/dynamixel
-        GIT_TAG "ae98a297e06721cdb6120242a43a0e0355c71f44"
+        GIT_TAG "05b0398a60b3aa44aedd9e1696a63658cb6997e3"
         GIT_PROGRESS ON
         GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
 )
@@ -91,8 +93,8 @@ add_link_options(-T ${LINKER_SCRIPT})
 
 add_executable(${PROJECT_NAME}.elf ${SOURCES} ${LINKER_SCRIPT})
 
-add_dependencies(${PROJECT_NAME}.elf CMSISDSP HexapodMath dynamixel)
-target_link_libraries(${PROJECT_NAME}.elf dynamixel CMSISDSP HexapodMath)
+add_dependencies(${PROJECT_NAME}.elf dynamixel HexapodMath CMSISDSP)
+target_link_libraries(${PROJECT_NAME}.elf dynamixel HexapodMath CMSISDSP)
 
 set(HEX_FILE ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.hex)
 set(BIN_FILE ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.bin)

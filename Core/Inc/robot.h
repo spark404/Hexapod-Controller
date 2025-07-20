@@ -1,0 +1,74 @@
+//
+// Created by Hugo Trippaers on 20/07/2025.
+//
+// Definitions for the robot
+//
+
+#ifndef ROBOT_H
+#define ROBOT_H
+
+#include "arm_math.h"
+#include "hexapodmath/additional_functions.h"
+
+struct leg {
+    /// Mount point of the leg to the body in polar coordinates
+    float32_t mount_point_polar[2];
+    /// The angles defined as home position
+    float32_t tip_home_angles[3];
+};
+
+struct robot {
+    struct leg leg[6];
+};
+
+struct leg_state {
+    struct pose coxa_body_joint;
+    arm_matrix_instance_f32 coxa_mat;
+    arm_matrix_instance_f32 coxa_mat_inv;
+    float32_t coxa_mat_data[16];
+    float32_t coxa_mat_inv_data[16];
+    /// The position of the leg tip in the body frame with the angles at the home position
+    float32_t tip_home[3];
+    /// The actual joint angles for this leg (coxa, femur, tibia) in rad
+    float32_t actual_joint_angles[3];
+    /// The calculated next joint angles for this leg (coxa, femur, tibia) in rad
+    float32_t next_joint_angles[3];
+};
+
+struct robot_state {
+    struct pose hexapod;
+    struct pose body;
+    struct leg_state leg_state[6];
+};
+
+
+const struct robot r = {
+    .leg = {
+        { // Front Right
+            .mount_point_polar = {90, D2R(-55)},
+            .tip_home_angles = {0.0f, 0.0f, D2R(90)}
+        },
+        { // Center Right
+            .mount_point_polar = {70, D2R(-90)},
+            .tip_home_angles = {0.0f, 0.0f, D2R(90)}
+        },
+        { // Rear Right
+            .mount_point_polar = {90, D2R(-125)},
+            .tip_home_angles = {0.0f, 0.0f, D2R(90)}
+        },
+        { // Front Left
+            .mount_point_polar = {90, D2R(55)},
+            .tip_home_angles = {0.0f, 0.0f, D2R(90)}
+        },
+        {
+            .mount_point_polar = {70, D2R(90)},
+            .tip_home_angles = {0.0f, 0.0f, D2R(90)}
+        },
+        {
+            .mount_point_polar = {90, D2R(125)},
+            .tip_home_angles = {0.0f, 0.0f, D2R(90)}
+        }
+    }
+};
+
+#endif //ROBOT_H
