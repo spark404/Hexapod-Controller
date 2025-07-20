@@ -41,6 +41,7 @@
 #include "robot.h"
 #include "calculator.h"
 #include "hexapodmath/forward_kinematics.h"
+#include "hexapodmath/hexapod.h"
 #include "hexapodmath/inverse_kinematics.h"
 #include "hexapodmath/matrix_3d.h"
 
@@ -87,6 +88,8 @@ arm_mat_init_f32(&M, S, S, p ## M ## Data)
 MATRIX(M, 4)
 
 #define RAD_PER_PULSE (float)(2 * M_PI / 4096)
+#define POWERDOWN_TIMEOUT 240
+#define MAIN_LOOP_INTERVAL 200.0f // ms
 
 /* USER CODE END PD */
 
@@ -133,6 +136,9 @@ dynamixel_bus_t dynamixel_bus;
 dynamixel_servo_t dynamixel_servo[3];
 
 volatile osThreadId_t servoCallbackThreadId;
+
+float32_t velocity = 50; // mm/s
+float32_t heading = 0.0f; // rad
 
 /* USER CODE END PV */
 
@@ -944,9 +950,6 @@ void StartDefaultTask(void *argument) {
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
-    float32_t velocity = 0; // mm/s
-    float32_t heading = 0;   // rad, with N = 0
-
     struct robot_state robot_state;
 
     typedef enum  {
@@ -994,9 +997,10 @@ void StartDefaultTask(void *argument) {
         float32_t tip_in_coxa[3];
         forward_kinematics(current_leg->tip_home_angles, tip_in_coxa);
         matrix_3d_vec_transform(&T, tip_in_coxa, current_leg_state->tip_home);
+
+        current_leg_state->grounded = 1; // All legs assumed to be grounded, STANDUP will take care of that
     }
 
-#define POWERDOWN_TIMEOUT 120
     uint16_t powerdown_timeout = POWERDOWN_TIMEOUT;
 
     /* Infinite loop */
@@ -1020,10 +1024,6 @@ void StartDefaultTask(void *argument) {
 
         // Determine the actual servo positions
         read_actual_servo_position(robot_state.leg_state[1].actual_joint_angles);
-        // printf("actual (%8.5f, %8.5f, %8.5f)\r\n",
-        //     robot_state.leg_state[1].actual_joint_angles[0],
-        //     robot_state.leg_state[1].actual_joint_angles[1],
-        //     robot_state.leg_state[1].actual_joint_angles[2]);
 
         // Perform calculation to determine the next step
         if (motion_state == SYNCING) {
@@ -1033,6 +1033,8 @@ void StartDefaultTask(void *argument) {
             }
             next_state = STANDUP;
         } else if (motion_state == STANDUP) {
+            int ready = 1;
+            motion_param_t motion_param = {50.0f, 20.0f, 50.0f};
             // Perform the standup routine, follows on SYNCING
             for (int i = 0; i < 6; i++) {
                 const struct leg *current_leg = &r.leg[i];
@@ -1052,7 +1054,9 @@ void StartDefaultTask(void *argument) {
 
                 float32_t p_next_in_body_frame[3];
                 float32_t p_next_in_coxa_frame[3];
-                calculate_motion_step(p_current_in_body_frame, p_target_in_body_frame, p_next_in_body_frame, 0.2);
+                float32_t distance_remaining;
+                calculate_motion_step(&motion_param, p_current_in_body_frame, p_target_in_body_frame, MAIN_LOOP_INTERVAL / 1000,
+                    p_next_in_body_frame, &distance_remaining);
 
                 float32_t origin[3] = {0.0f, 0.0f, 0.0f};
                 matrix_3d_vec_transform(&current_leg_state->coxa_mat_inv, p_next_in_body_frame, p_next_in_coxa_frame);
@@ -1062,9 +1066,103 @@ void StartDefaultTask(void *argument) {
                     printf("C: %5.2f %5.2f %5.2f\r\n", p_current_in_body_frame[0], p_current_in_body_frame[1], p_current_in_body_frame[2]);
                     printf("N: %5.2f %5.2f %5.2f\r\n", p_next_in_body_frame[0], p_next_in_body_frame[1], p_next_in_body_frame[2]);
                     printf("T: %5.2f %5.2f %5.2f\r\n", p_target_in_body_frame[0], p_target_in_body_frame[1], p_target_in_body_frame[2]);
+                    printf("Distance remaining %5.2f\r\n", distance_remaining);
                 }
+
+                ready = distance_remaining < 2.0f;
             }
 
+            if (ready) {
+                robot_state.body.translation[2] = 100;
+                next_state = STANDING;
+            }
+        } else if (motion_state == STANDING) {
+            if (velocity > 0.0f) {
+                next_state = WALKING;
+            }
+        } else if (motion_state == WALKING) {
+            if (velocity == 0.0f) {
+                next_state = STANDING;
+            }
+
+            // Determine the movement
+            float32_t motion_vector[3] = { velocity * arm_cos_f32(heading), velocity * arm_sin_f32(heading), 0};
+            float32_t movement_vector[3];
+            arm_vec_mult_scalar_f32(motion_vector, MAIN_LOOP_INTERVAL / 1000, movement_vector, 3);
+
+            // Move the hexapod in the world
+            robot_state.hexapod.translation[0] += movement_vector[0];
+            robot_state.hexapod.translation[1] += movement_vector[1];
+
+            // Update the translations so they are performed with respect to the new location
+            MATRIX4(Thexapod);
+            MATRIX4(Tbody);
+            pose_get_transformation(&robot_state.hexapod, &Thexapod);
+            pose_get_transformation(&robot_state.body, &Tbody);
+
+            MATRIX4(Thexapod_body);
+            arm_mat_mult_f32(&Thexapod, &Tbody, &Thexapod_body);
+
+            // Determine if we need to reinitialize the gait
+            uint8_t re_init = 1;
+            for (int i = 0; i < 6; i++) {
+                re_init = robot_state.leg_state[i].grounded;
+            }
+
+            if (re_init) {
+                printf("(Re)Initializing tripod gait\r\n");
+                robot_state.leg_state[1].grounded = 0;
+                robot_state.leg_state[3].grounded = 0;
+                robot_state.leg_state[5].grounded = 0;
+            }
+
+            // Legs need to move twice as fast as the body
+            motion_param_t motion_param = { velocity * 2.0f, 20.0f, 40.0f};
+
+            for (int i = 0; i < 6; i++) {
+                const struct leg *current_leg = &r.leg[i];
+                struct leg_state *current_leg_state = &robot_state.leg_state[i];
+
+                if (!current_leg_state->grounded) {
+                    // Determine current in the body frame
+                    float32_t p_current_in_coxa_frame[3];
+                    float32_t p_current_in_body_frame[3];
+                    forward_kinematics(current_leg_state->actual_joint_angles, p_current_in_coxa_frame);
+                    matrix_3d_vec_transform(&current_leg_state->coxa_mat, p_current_in_coxa_frame, p_current_in_body_frame);
+
+                    // Calculate the target in the body frame
+                    // Which is half the stepsize in the direction of the movement
+                    // Only use the xy (2d) coordinates for this calculation
+                    float32_t p_target_in_body_frame[3];
+                    project_point_on_circle(r.step_size, current_leg_state->tip_home, movement_vector, p_target_in_body_frame);
+                    p_target_in_body_frame[2] = 0.0f; // In the body frame, 0 is ground level
+
+                    float32_t p_next_in_body_frame[3];
+                    float32_t distance_remaining;
+                    calculate_motion_step(&motion_param, p_current_in_body_frame, p_target_in_body_frame, MAIN_LOOP_INTERVAL / 1000,
+                        p_next_in_body_frame, &distance_remaining);
+
+                    // Translate the target to a world location
+                    float32_t p_next_in_world_frame[3];
+                    matrix_3d_vec_transform(&Tbody, p_next_in_body_frame, p_next_in_world_frame);
+                    arm_vec_copy_f32(p_next_in_world_frame, current_leg_state->tip_world_coordinates, 3);
+                }
+
+                // TODO Calculate the new angles using the tip_world_coordinate for each leg
+                // convert tip_world_coordinate to leg frame
+                // inverse kinematics
+
+            }
+
+
+
+        }
+
+        // Until we have all legs attached assume the other move
+        for (int i = 0; i < 6; i++) {
+            if (i==1)
+                continue;
+            arm_vec_copy_f32(robot_state.leg_state[i].next_joint_angles, robot_state.leg_state[i].actual_joint_angles, 3);
         }
 
         // Write next values to the servos
@@ -1079,7 +1177,7 @@ void StartDefaultTask(void *argument) {
         HAL_GPIO_TogglePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin);
 
         // Schedule at fixed 1 Hz
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(200));
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(MAIN_LOOP_INTERVAL));
     }
     /* USER CODE END 5 */
 }

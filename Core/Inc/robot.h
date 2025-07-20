@@ -19,6 +19,7 @@ struct leg {
 
 struct robot {
     struct leg leg[6];
+    float32_t step_size;
 };
 
 struct leg_state {
@@ -33,6 +34,10 @@ struct leg_state {
     float32_t actual_joint_angles[3];
     /// The calculated next joint angles for this leg (coxa, femur, tibia) in rad
     float32_t next_joint_angles[3];
+    /// Indicates if the leg is lifted off the ground or not
+    uint8_t grounded;
+    /// Tip position in the world fram
+    float32_t tip_world_coordinates[3];
 };
 
 struct robot_state {
@@ -43,6 +48,7 @@ struct robot_state {
 
 
 const struct robot r = {
+    .step_size = 80, // mm
     .leg = {
         { // Front Right
             .mount_point_polar = {90, D2R(-55)},
