@@ -90,6 +90,7 @@ MATRIX(M, 4)
 #define RAD_PER_PULSE (float)(2 * M_PI / 4096)
 #define POWERDOWN_TIMEOUT 240
 #define MAIN_LOOP_INTERVAL 200.0f // ms
+#define CLOSE_BY_THRESHOLD 3.0f // mm
 
 /* USER CODE END PD */
 
@@ -1069,11 +1070,13 @@ void StartDefaultTask(void *argument) {
                     printf("Distance remaining %5.2f\r\n", distance_remaining);
                 }
 
-                ready = distance_remaining < 2.0f;
+                if (distance_remaining > CLOSE_BY_THRESHOLD) {
+                    ready = 0;
+                };
             }
 
             if (ready) {
-                robot_state.body.translation[2] = 100;
+                robot_state.body.translation[2] = 100; // Mirrors the height set in the target
                 next_state = STANDING;
             }
         } else if (motion_state == STANDING) {
@@ -1083,6 +1086,36 @@ void StartDefaultTask(void *argument) {
         } else if (motion_state == WALKING) {
             if (velocity == 0.0f) {
                 next_state = STANDING;
+            }
+
+            // Determine if we need to reinitialize the gait
+            uint8_t re_init = 1;
+            for (int i = 0; i < 6; i++) {
+                if (robot_state.leg_state[i].grounded == 0) {
+                    re_init = 0;
+                }
+            }
+
+            if (re_init) {
+                printf("(Re)Initializing tripod gait\r\n");
+                robot_state.leg_state[1].grounded = 0;
+                robot_state.leg_state[3].grounded = 0;
+                robot_state.leg_state[5].grounded = 0;
+
+                // Init the world positions of the tips
+                for (int i = 0; i < 6; i++) {
+                    // Use the current angles to determine the current world coordinates of the tip
+                    const struct leg *current_leg = &r.leg[i];
+                    struct leg_state *current_leg_state = &robot_state.leg_state[i];
+
+                    MATRIX4(T);
+                    arm_mat_mult_f32(&Thexapod_body, &current_leg_state->coxa_mat, &T);
+
+                    float32_t tip_in_coxa[3];
+                    forward_kinematics(current_leg_state->actual_joint_angles, tip_in_coxa);
+                    matrix_3d_vec_transform(&T, tip_in_coxa, current_leg_state->tip_world_coordinates);
+                }
+
             }
 
             // Determine the movement
@@ -1095,29 +1128,14 @@ void StartDefaultTask(void *argument) {
             robot_state.hexapod.translation[1] += movement_vector[1];
 
             // Update the translations so they are performed with respect to the new location
-            MATRIX4(Thexapod);
-            MATRIX4(Tbody);
             pose_get_transformation(&robot_state.hexapod, &Thexapod);
             pose_get_transformation(&robot_state.body, &Tbody);
 
-            MATRIX4(Thexapod_body);
             arm_mat_mult_f32(&Thexapod, &Tbody, &Thexapod_body);
 
-            // Determine if we need to reinitialize the gait
-            uint8_t re_init = 1;
-            for (int i = 0; i < 6; i++) {
-                re_init = robot_state.leg_state[i].grounded;
-            }
-
-            if (re_init) {
-                printf("(Re)Initializing tripod gait\r\n");
-                robot_state.leg_state[1].grounded = 0;
-                robot_state.leg_state[3].grounded = 0;
-                robot_state.leg_state[5].grounded = 0;
-            }
-
             // Legs need to move twice as fast as the body
-            motion_param_t motion_param = { velocity * 2.0f, 20.0f, 40.0f};
+            motion_param_t motion_param = { 160, 20.0f, 40.0f};
+            uint8_t should_swap = 1;
 
             for (int i = 0; i < 6; i++) {
                 const struct leg *current_leg = &r.leg[i];
@@ -1135,7 +1153,7 @@ void StartDefaultTask(void *argument) {
                     // Only use the xy (2d) coordinates for this calculation
                     float32_t p_target_in_body_frame[3];
                     project_point_on_circle(r.step_size, current_leg_state->tip_home, movement_vector, p_target_in_body_frame);
-                    p_target_in_body_frame[2] = 0.0f; // In the body frame, 0 is ground level
+                    p_target_in_body_frame[2] = -100.0f; // In the body frame, -100 is ground level
 
                     float32_t p_next_in_body_frame[3];
                     float32_t distance_remaining;
@@ -1144,17 +1162,35 @@ void StartDefaultTask(void *argument) {
 
                     // Translate the target to a world location
                     float32_t p_next_in_world_frame[3];
-                    matrix_3d_vec_transform(&Tbody, p_next_in_body_frame, p_next_in_world_frame);
+                    matrix_3d_vec_transform(&Thexapod_body, p_next_in_body_frame, p_next_in_world_frame);
                     arm_vec_copy_f32(p_next_in_world_frame, current_leg_state->tip_world_coordinates, 3);
+
+                    if (distance_remaining > CLOSE_BY_THRESHOLD) {
+                        printf("Distance remaining for leg %d = %5.2f\r\n", i, distance_remaining);
+                        should_swap = 0;
+                    }
                 }
 
                 // TODO Calculate the new angles using the tip_world_coordinate for each leg
-                // convert tip_world_coordinate to leg frame
-                // inverse kinematics
+                MATRIX4(T);
+                arm_mat_mult_f32(&Thexapod_body, &current_leg_state->coxa_mat, &T);
 
+                MATRIX4(Tinv);
+                matrix_3d_invert(&T, &Tinv);
+
+                float32_t tip_in_coxa[3];
+                matrix_3d_vec_transform(&Tinv, current_leg_state->tip_world_coordinates, tip_in_coxa);
+
+                float32_t origin[3] = {0.0f, 0.0f, 0.0f};
+                inverse_kinematics(origin, tip_in_coxa, current_leg_state->next_joint_angles);
             }
 
-
+            if (should_swap) {
+                printf("Swap gait legs\r\n");
+                for (int i = 0; i < 6; i++) {
+                    robot_state.leg_state[i].grounded = robot_state.leg_state[i].grounded == 0;
+                }
+            }
 
         }
 
