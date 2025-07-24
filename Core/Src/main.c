@@ -619,13 +619,13 @@ static void MX_GPIO_Init(void) {
     __HAL_RCC_GPIOB_CLK_ENABLE();
 
     /*Configure GPIO pin Output Level */
-    HAL_GPIO_WritePin(GPIOC, SPI2_CS_ACC_Pin | SPI2_CS_GYR_Pin | ST_LED_B_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOC, SPI2_CS_ACC_Pin | SPI2_CS_GYR_Pin | ST_LED_G_Pin, GPIO_PIN_RESET);
 
     /*Configure GPIO pin Output Level */
-    HAL_GPIO_WritePin(GPIOA, ST_LED_G_Pin | ST_LED_R_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOA, ST_LED_B_Pin | ST_LED_R_Pin, GPIO_PIN_RESET);
 
     /*Configure GPIO pins : SPI2_CS_ACC_Pin SPI2_CS_GYR_Pin ST_LED_G_Pin */
-    GPIO_InitStruct.Pin = SPI2_CS_ACC_Pin | SPI2_CS_GYR_Pin | ST_LED_B_Pin;
+    GPIO_InitStruct.Pin = SPI2_CS_ACC_Pin | SPI2_CS_GYR_Pin | ST_LED_G_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -638,7 +638,7 @@ static void MX_GPIO_Init(void) {
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     /*Configure GPIO pins : ST_LED_B_Pin ST_LED_R_Pin */
-    GPIO_InitStruct.Pin = ST_LED_G_Pin | ST_LED_R_Pin;
+    GPIO_InitStruct.Pin = ST_LED_B_Pin | ST_LED_R_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -697,6 +697,7 @@ BMM350_INTF_RET_TYPE stm32_bmm350_write(uint8_t reg_addr, const uint8_t *reg_dat
 }
 
 void stm32_bmm350_delay_us(uint32_t period, void *intf_ptr) {
+    (void)intf_ptr;
     // htim1 setup, prescaler 16-1, ARR 0xffff-1
     __HAL_TIM_SET_COUNTER(&htim1, 0); // set the counter value a 0
     while (__HAL_TIM_GET_COUNTER(&htim1) < period); // wait for the counter to reach the us input in the parameter
@@ -743,6 +744,7 @@ BMI08_INTF_RET_TYPE stm32_bmi08_write(uint8_t reg_addr, const uint8_t *reg_data,
 }
 
 void stm32_bmi08_delay_us(uint32_t period, void *intf_ptr) {
+    (void)intf_ptr;
     // htim1 setup, prescaler 16-1, ARR 0xffff-1
     __HAL_TIM_SET_COUNTER(&htim1, 0); // set the counter value a 0
     while (__HAL_TIM_GET_COUNTER(&htim1) < period); // wait for the counter to reach the us input in the parameter
@@ -844,6 +846,7 @@ void write_next_servo_position(const float32_t *next_servo_angles) {
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument) {
     /* USER CODE BEGIN 5 */
+    (void)argument;
     printf("Starting device checks\r\n");
 
     HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_SET);
@@ -870,6 +873,9 @@ void StartDefaultTask(void *argument) {
     bmi088.write = &stm32_bmi08_write;
     bmi088.intf_ptr_accel = &bmi088_acc_intf;
     bmi088.intf_ptr_gyro = &bmi088_gyr_intf;
+
+    float32_t prev_remaining[6] = {0,0,0};
+
 
     int8_t bmi088_res = bmi08g_init(&bmi088);
     if (bmi088_res != 0) {
@@ -946,9 +952,6 @@ void StartDefaultTask(void *argument) {
 
     osDelay(pdMS_TO_TICKS(1000));
 
-    struct bmm350_mag_temp_data mag_temp_data;
-    uint8_t state = 0;
-
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
     struct robot_state robot_state;
@@ -1008,11 +1011,11 @@ void StartDefaultTask(void *argument) {
     for (;;) {
         HAL_GPIO_TogglePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin);
 
-        if (velocity == 0 && motion_state != SYNCING && motion_state != POWERDOWN) {
+        if (motion_state != SYNCING && motion_state != POWERDOWN) {
             if (powerdown_timeout == 0) {
                 next_state = POWERDOWN;
                 for (int i = 0; i < 3; i++) {
-                    printf("Dectivating servo %d...\r\n", i);
+                    printf("Deactivating servo %d...\r\n", i);
                     dynamixel_set_torque_enable(&dynamixel_servo[i], 0);
                     dynamixel_set_led(&dynamixel_servo[i], 0);
                 }
@@ -1038,7 +1041,6 @@ void StartDefaultTask(void *argument) {
             motion_param_t motion_param = {50.0f, 20.0f, 50.0f};
             // Perform the standup routine, follows on SYNCING
             for (int i = 0; i < 6; i++) {
-                const struct leg *current_leg = &r.leg[i];
                 struct leg_state *current_leg_state = &robot_state.leg_state[i];
 
                 // Target position of each leg after standup
@@ -1077,6 +1079,10 @@ void StartDefaultTask(void *argument) {
 
             if (ready) {
                 robot_state.body.translation[2] = 100; // Mirrors the height set in the target
+                pose_get_transformation(&robot_state.hexapod, &Thexapod);
+                pose_get_transformation(&robot_state.body, &Tbody);
+                arm_mat_mult_f32(&Thexapod, &Tbody, &Thexapod_body);
+
                 next_state = STANDING;
             }
         } else if (motion_state == STANDING) {
@@ -1088,10 +1094,10 @@ void StartDefaultTask(void *argument) {
                 next_state = STANDING;
             }
 
-            // Determine if we need to reinitialize the gait
+            // Reinitialize the gait when all legs are on the ground at the same time
             uint8_t re_init = 1;
             for (int i = 0; i < 6; i++) {
-                if (robot_state.leg_state[i].grounded == 0) {
+                if (!robot_state.leg_state[i].grounded) {
                     re_init = 0;
                 }
             }
@@ -1102,10 +1108,8 @@ void StartDefaultTask(void *argument) {
                 robot_state.leg_state[3].grounded = 0;
                 robot_state.leg_state[5].grounded = 0;
 
-                // Init the world positions of the tips
+                // Use the actual angles to determine the current world coordinates of the tip
                 for (int i = 0; i < 6; i++) {
-                    // Use the current angles to determine the current world coordinates of the tip
-                    const struct leg *current_leg = &r.leg[i];
                     struct leg_state *current_leg_state = &robot_state.leg_state[i];
 
                     MATRIX4(T);
@@ -1115,7 +1119,6 @@ void StartDefaultTask(void *argument) {
                     forward_kinematics(current_leg_state->actual_joint_angles, tip_in_coxa);
                     matrix_3d_vec_transform(&T, tip_in_coxa, current_leg_state->tip_world_coordinates);
                 }
-
             }
 
             // Determine the movement
@@ -1133,66 +1136,97 @@ void StartDefaultTask(void *argument) {
 
             arm_mat_mult_f32(&Thexapod, &Tbody, &Thexapod_body);
 
-            // Legs need to move twice as fast as the body
-            motion_param_t motion_param = { 160, 20.0f, 40.0f};
-            uint8_t should_swap = 1;
-
+            float32_t longest_path = 0.f;
+            float32_t remaining_path_length = 0.f;
+            float32_t paths[6][4][3];
             for (int i = 0; i < 6; i++) {
-                const struct leg *current_leg = &r.leg[i];
                 struct leg_state *current_leg_state = &robot_state.leg_state[i];
 
-                if (!current_leg_state->grounded) {
-                    // Determine current in the body frame
-                    float32_t p_current_in_coxa_frame[3];
-                    float32_t p_current_in_body_frame[3];
-                    forward_kinematics(current_leg_state->actual_joint_angles, p_current_in_coxa_frame);
-                    matrix_3d_vec_transform(&current_leg_state->coxa_mat, p_current_in_coxa_frame, p_current_in_body_frame);
+                float32_t step_size = 40;
+                float32_t origin[2] = {current_leg_state->tip_home[0], current_leg_state->tip_home[1]};
 
-                    // Calculate the target in the body frame
-                    // Which is half the stepsize in the direction of the movement
-                    // Only use the xy (2d) coordinates for this calculation
-                    float32_t p_target_in_body_frame[3];
-                    project_point_on_circle(r.step_size, current_leg_state->tip_home, movement_vector, p_target_in_body_frame);
-                    p_target_in_body_frame[2] = -100.0f; // In the body frame, -100 is ground level
+                float32_t p_current_in_body_frame[3];
+                float32_t tip_in_coxa[3];
+                forward_kinematics(current_leg_state->actual_joint_angles, tip_in_coxa);
+                matrix_3d_vec_transform(&current_leg_state->coxa_mat, tip_in_coxa, p_current_in_body_frame);
 
-                    float32_t p_next_in_body_frame[3];
-                    float32_t distance_remaining;
-                    calculate_motion_step(&motion_param, p_current_in_body_frame, p_target_in_body_frame, MAIN_LOOP_INTERVAL / 1000,
-                        p_next_in_body_frame, &distance_remaining);
+                if (current_leg_state->grounded) {
+                    float32_t movement_vector_grounded[3];
+                    arm_vec_mult_scalar_f32(movement_vector, -1, movement_vector_grounded, 3);
 
-                    // Translate the target to a world location
-                    float32_t p_next_in_world_frame[3];
-                    matrix_3d_vec_transform(&Thexapod_body, p_next_in_body_frame, p_next_in_world_frame);
-                    arm_vec_copy_f32(p_next_in_world_frame, current_leg_state->tip_world_coordinates, 3);
+                    float32_t point[2];
+                    project_point_on_circle(step_size, origin, movement_vector_grounded, point);
+                    float32_t p_target_in_body_frame[3] = {point[0], point[1], robot_state.body.translation[2] * -1};
 
-                    if (distance_remaining > CLOSE_BY_THRESHOLD) {
-                        printf("Distance remaining for leg %d = %5.2f\r\n", i, distance_remaining);
-                        should_swap = 0;
-                    }
+                    arm_vec_copy_f32(p_current_in_body_frame, paths[i][0], 3);
+                    arm_vec_copy_f32(p_current_in_body_frame, paths[i][1], 3);
+                    arm_vec_copy_f32(p_current_in_body_frame, paths[i][2], 3);
+                    arm_vec_copy_f32(p_target_in_body_frame, paths[i][3], 3);
+
+                    float32_t path_length = arm_euclidean_distance_f32(p_current_in_body_frame, p_target_in_body_frame, 3);
+                    longest_path = fmaxf(path_length, longest_path);
+                } else {
+                    float32_t point[2];
+                    project_point_on_circle(step_size, origin, movement_vector, point);
+                    float32_t p_target_in_body_frame[3] = {point[0], point[1], robot_state.body.translation[2] * -1};
+
+                    calculate_path(p_current_in_body_frame, p_target_in_body_frame, 25, 2.0f, paths[i]);
                 }
+            }
 
-                // TODO Calculate the new angles using the tip_world_coordinate for each leg
+            for (int i = 0; i<6; i++) {
+                struct leg_state *current_leg_state = &robot_state.leg_state[i];
+
                 MATRIX4(T);
                 arm_mat_mult_f32(&Thexapod_body, &current_leg_state->coxa_mat, &T);
-
                 MATRIX4(Tinv);
                 matrix_3d_invert(&T, &Tinv);
 
-                float32_t tip_in_coxa[3];
-                matrix_3d_vec_transform(&Tinv, current_leg_state->tip_world_coordinates, tip_in_coxa);
+                float32_t velocity = arm_vec_magnitude_f32(movement_vector, 3);
+                float32_t substeps = longest_path / velocity;
 
-                float32_t origin[3] = {0.0f, 0.0f, 0.0f};
-                inverse_kinematics(origin, tip_in_coxa, current_leg_state->next_joint_angles);
+                float32_t path_length = calculate_path_length(paths[i]);
+                float32_t step_length = path_length / substeps;
+
+                float32_t delta[3] = {0.0f, 0.0f, 0.0f};
+                interpolate(paths[i], step_length, delta);
+
+                float32_t p_next_in_body_frame[3];
+                arm_vec_copy_f32(delta, p_next_in_body_frame, 3);
+
+                float32_t p_next_in_world_frame[3];
+                matrix_3d_vec_transform(&Thexapod_body, p_next_in_body_frame, p_next_in_world_frame);
+
+                if (current_leg_state->grounded) {
+                    // Just use the existing coordinates for the world frame
+                    arm_vec_copy_f32(current_leg_state->tip_world_coordinates, p_next_in_world_frame, 3);
+                } else {
+                    remaining_path_length = fmaxf(remaining_path_length, arm_euclidean_distance_f32(p_next_in_body_frame, paths[i][3], 3));
+                    printf("%d Remaining: %5.2f %5.2f\r\n", i, remaining_path_length, prev_remaining[i]);
+                    prev_remaining[i] = remaining_path_length;
+                    arm_vec_copy_f32(p_next_in_world_frame, current_leg_state->tip_world_coordinates,  3);
+                }
+
+                // remaining_path_length = fmaxf(remaining_path_length, arm_euclidean_distance_f32(p_next_in_body_frame, paths[i][3], 3));
+
+                float32_t p_next_in_coxa_frame[3];
+                matrix_3d_vec_transform(&Tinv, p_next_in_world_frame, p_next_in_coxa_frame);
+
+                float32_t origin[3] = {0, 0, 0};
+                inverse_kinematics(origin, p_next_in_coxa_frame, robot_state.leg_state[i].next_joint_angles);
+
             }
 
-            if (should_swap) {
-                printf("Swap gait legs\r\n");
-                for (int i = 0; i < 6; i++) {
-                    robot_state.leg_state[i].grounded = robot_state.leg_state[i].grounded == 0;
+            if (remaining_path_length < CLOSE_BY_THRESHOLD) {
+                printf("Swap\r\n");
+                for (int i = 0; i<6; i++) {
+                    struct leg_state *current_leg_state = &robot_state.leg_state[i];
+                    current_leg_state->grounded = !current_leg_state->grounded;
                 }
             }
 
         }
+
 
         // Until we have all legs attached assume the other move
         for (int i = 0; i < 6; i++) {

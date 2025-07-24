@@ -61,7 +61,7 @@ FetchContent_MakeAvailable(cmsis-dsp)
 FetchContent_Declare(
         HexapodMath
         GIT_REPOSITORY git@github.com:spark404/HexapodMath
-        GIT_TAG "81c8630e381275a9198f712b9919335291fdc18c"
+        GIT_TAG "6d71c4f8d9e62fbabbac934b69a286cc7ec6f012"
         GIT_PROGRESS ON
         GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
 )
