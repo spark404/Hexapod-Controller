@@ -1,0 +1,49 @@
+//
+// Created by Hugo Trippaers on 24/07/2025.
+//
+
+#ifndef LOG_H
+#define LOG_H
+#include <stdio.h>
+
+typedef enum {
+    LOG_LEVEL_DEBUG,
+    LOG_LEVEL_INFO,
+    LOG_LEVEL_WARN,
+    LOG_LEVEL_ERROR,
+    LOG_LEVEL_FATAL
+} log_level_t;
+
+#ifndef LOG_DEFAULT_LEVEL
+#define LOG_DEFAULT_LEVEL LOG_LEVEL_DEBUG
+#endif
+
+// Allow overriding
+extern int g_log_level;
+
+static inline const char* log_level_str(log_level_t level) {
+    switch((int)level) {
+        case LOG_LEVEL_DEBUG: return "DEBUG";
+        case LOG_LEVEL_INFO:  return "INFO";
+        case LOG_LEVEL_WARN:  return "WARN";
+        case LOG_LEVEL_ERROR: return "ERROR";
+        case LOG_LEVEL_FATAL: return "FATAL";
+        default:              return "UNKNOWN";
+    }
+}
+
+#define log_printf(level, fmt, ...) \
+do { \
+if ((level) >= g_log_level) { \
+printf("[%s:%d][%s] " fmt "\n", \
+__FILE__, __LINE__, log_level_str(level), ##__VA_ARGS__); \
+} \
+} while(0)
+
+#define LOG_DEBUG(fmt, ...)   log_printf(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)    log_printf(LOG_LEVEL_INFO,  fmt, ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...)    log_printf(LOG_LEVEL_WARN,  fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...)   log_printf(LOG_LEVEL_ERROR, fmt, ##__VA_ARGS__)
+#define LOG_FATAL(fmt, ...)   log_printf(LOG_LEVEL_FATAL, fmt, ##__VA_ARGS__)
+
+#endif //LOG_H

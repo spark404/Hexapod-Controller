@@ -28,22 +28,27 @@
 #include "stm32f4xx_ll_usart.h"
 #include "stm32f4xx_hal_i2c.h"
 
+#include "arm_math.h"
+
 #include "bmm350.h"
 #include "bmi08x.h"
 #include "bno055.h"
+
 #include "dynamixel/dynamixel.h"
 #include "dynamixel_ll_uart.h"
-#include "arm_math.h"
+
 #include "hexapodmath/additional_functions.h"
 #include "hexapodmath/conversion_2d.h"
 #include "hexapodmath/pose.h"
-
-#include "robot.h"
-#include "calculator.h"
 #include "hexapodmath/forward_kinematics.h"
 #include "hexapodmath/hexapod.h"
 #include "hexapodmath/inverse_kinematics.h"
 #include "hexapodmath/matrix_3d.h"
+
+#include "robot.h"
+#include "calculator.h"
+#include "servos.h"
+#include "log.h"
 
 /* USER CODE END Includes */
 
@@ -87,7 +92,6 @@ arm_mat_init_f32(&M, S, S, p ## M ## Data)
 #define MATRIX4(M) \
 MATRIX(M, 4)
 
-#define RAD_PER_PULSE (float)(2 * M_PI / 4096)
 #define POWERDOWN_TIMEOUT 240
 #define MAIN_LOOP_INTERVAL 200.0f // ms
 #define CLOSE_BY_THRESHOLD 3.0f // mm
@@ -193,15 +197,7 @@ void stm32_bno055_delay_us(u32 period);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-uint32_t angle_to_pulse(float angle) {
-    // Due to mounting 0 rad is actually PI rad
-    float actual_angle = angle + (float)M_PI;
-    return (uint32_t)roundf(actual_angle / RAD_PER_PULSE);
-}
-
-float pulse_to_angle(uint32_t pulse) {
-    return (float)pulse * RAD_PER_PULSE - (float)M_PI;
-}
+int g_log_level = LOG_LEVEL_DEBUG;
 
 /* USER CODE END 0 */
 
@@ -801,38 +797,6 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
         osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_ERR);
     }
 }
-
-void read_actual_servo_position(float32_t *actual_servo_angles) {
-    // Read actual position
-    uint32_t actual_position[3];
-    dynamixel_result_t res = dynamixel_sync_get_long_parameter(dynamixel_servo, XL430_CT_RAM_PRESENT_POSITION, actual_position, 3);
-    if (res != DNM_OK) {
-        printf("Failed to get long position using sync read: %d\r\n", res);
-    }
-
-    float actual_angle[3];
-    for (int i = 0; i < 3; i++) {
-        actual_angle[i] = pulse_to_angle(actual_position[i]);
-    }
-
-    // Compensate for geometry
-    actual_angle[1] = -actual_angle[1];
-    actual_angle[2] += D2R(25);
-
-    arm_vec_copy_f32(actual_angle, actual_servo_angles, 3);
-}
-
-void write_next_servo_position(const float32_t *next_servo_angles) {
-    float32_t angles_next[3];
-
-    arm_vec_copy_f32(next_servo_angles, angles_next, 3);
-    angles_next[1] = -angles_next[1];
-    angles_next[2] -= D2R(25);
-
-    uint32_t position_next[] = {angle_to_pulse(angles_next[0]), angle_to_pulse(angles_next[1]), angle_to_pulse(angles_next[2])};
-    dynamixel_sync_set_long_parameter(dynamixel_servo, XL430_CT_RAM_GOAL_POSITION, position_next, 3);
-}
-
 /* USER CODE END 4 */
 
 
@@ -1011,25 +975,60 @@ void StartDefaultTask(void *argument) {
     for (;;) {
         HAL_GPIO_TogglePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin);
 
+        // Rules for transitions
         if (motion_state != SYNCING && motion_state != POWERDOWN) {
             if (powerdown_timeout == 0) {
                 next_state = POWERDOWN;
-                for (int i = 0; i < 3; i++) {
-                    printf("Deactivating servo %d...\r\n", i);
-                    dynamixel_set_torque_enable(&dynamixel_servo[i], 0);
-                    dynamixel_set_led(&dynamixel_servo[i], 0);
-                }
             } else {
                 powerdown_timeout--;
             }
         } else {
             powerdown_timeout = POWERDOWN_TIMEOUT;
         }
+        if (motion_state == STANDING && velocity > 0.0f) {
+            next_state = WALKING;
+        }
+        if (motion_state == WALKING && velocity == 0.0f) {
+            next_state = STANDING;
+        }
+
+        // State machine
+        if (motion_state != next_state) {
+            printf("Transitioning to motion state %d\r\n", motion_state);
+            switch (motion_state) {
+                case SYNCING:
+                    // No transition
+                    break;
+                case STANDUP:
+                    // No transition
+                    break;
+                case WALKING:
+                    // No transition
+                    break;
+                case STANDING:
+                    // No transition
+                    break;
+                case POWERDOWN:
+                    for (int i = 0; i < 3; i++) {
+                        printf("Deactivating servo %d...\r\n", i);
+                        dynamixel_set_torque_enable(&dynamixel_servo[i], 0);
+                        dynamixel_set_led(&dynamixel_servo[i], 0);
+                    }
+                    break;
+            }
+            motion_state = next_state;
+        }
 
         // Determine the actual servo positions
-        read_actual_servo_position(robot_state.leg_state[1].actual_joint_angles);
+        // Until we have all legs just copy the next to actual for the other legs
+        for (int i = 0; i < 6; i++) {
+            if (i == 1)
+                continue;
+            arm_vec_copy_f32(robot_state.leg_state[i].next_joint_angles, robot_state.leg_state[i].actual_joint_angles,
+                             3);
+        }
+        read_actual_servo_position(dynamixel_servo, 3, robot_state.leg_state[1].actual_joint_angles);
 
-        // Perform calculation to determine the next step
         if (motion_state == SYNCING) {
             // Make sure actual and next angles are set to the same value
             for (int i = 0; i < 6; i++) {
@@ -1085,15 +1084,7 @@ void StartDefaultTask(void *argument) {
 
                 next_state = STANDING;
             }
-        } else if (motion_state == STANDING) {
-            if (velocity > 0.0f) {
-                next_state = WALKING;
-            }
         } else if (motion_state == WALKING) {
-            if (velocity == 0.0f) {
-                next_state = STANDING;
-            }
-
             // Reinitialize the gait when all legs are on the ground at the same time
             uint8_t re_init = 1;
             for (int i = 0; i < 6; i++) {
@@ -1207,8 +1198,6 @@ void StartDefaultTask(void *argument) {
                     arm_vec_copy_f32(p_next_in_world_frame, current_leg_state->tip_world_coordinates,  3);
                 }
 
-                // remaining_path_length = fmaxf(remaining_path_length, arm_euclidean_distance_f32(p_next_in_body_frame, paths[i][3], 3));
-
                 float32_t p_next_in_coxa_frame[3];
                 matrix_3d_vec_transform(&Tinv, p_next_in_world_frame, p_next_in_coxa_frame);
 
@@ -1227,22 +1216,8 @@ void StartDefaultTask(void *argument) {
 
         }
 
-
-        // Until we have all legs attached assume the other move
-        for (int i = 0; i < 6; i++) {
-            if (i==1)
-                continue;
-            arm_vec_copy_f32(robot_state.leg_state[i].next_joint_angles, robot_state.leg_state[i].actual_joint_angles, 3);
-        }
-
         // Write next values to the servos
-        write_next_servo_position(robot_state.leg_state[1].next_joint_angles);
-
-        // Prepare for the next iteration
-        if (motion_state != next_state) {
-            motion_state = next_state;
-            printf("Switching to motion state %d\r\n", motion_state);
-        }
+        write_next_servo_position(dynamixel_servo, 3, robot_state.leg_state[1].next_joint_angles);
 
         HAL_GPIO_TogglePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin);
 
