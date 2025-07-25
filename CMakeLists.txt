@@ -63,7 +63,7 @@ FetchContent_MakeAvailable(cmsis-dsp)
 
 FetchContent_Declare(
         HexapodMath
-        GIT_REPOSITORY git@github.com:spark404/HexapodMath
+        GIT_REPOSITORY https://github.com/spark404/HexapodMath.git
         GIT_TAG "6d71c4f8d9e62fbabbac934b69a286cc7ec6f012"
         GIT_PROGRESS ON
         GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
@@ -72,7 +72,7 @@ FetchContent_MakeAvailable(HexapodMath)
 
 FetchContent_Declare(
         dynamixel
-        GIT_REPOSITORY git@github.com:spark404/dynamixel
+        GIT_REPOSITORY https://github.com/spark404/dynamixel.git
         GIT_TAG "05b0398a60b3aa44aedd9e1696a63658cb6997e3"
         GIT_PROGRESS ON
         GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
