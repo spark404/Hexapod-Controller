@@ -138,7 +138,7 @@ bno055_tt bno055;
 
 dynamixel_ll_uart_context dynamixel_uart_context;
 dynamixel_bus_t dynamixel_bus;
-dynamixel_servo_t dynamixel_servo[3];
+dynamixel_servo_t dynamixel_servo[3*6];
 
 volatile osThreadId_t servoCallbackThreadId;
 
@@ -887,34 +887,26 @@ void StartDefaultTask(void *argument) {
         printf("BNO055 initialization complete!\r\n");
     }
 
+    HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_RESET);
+    osDelay(pdMS_TO_TICKS(500));
+    HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_SET);
+
     dynamixel_uart_context.huart = &huart6;
     dynamixel_uart_context.callerThread = osThreadGetId();
 
-    DYNAMIXEL_ERROR_CHECK(dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, &dynamixel_uart_context));
-    DYNAMIXEL_ERROR_CHECK(dynamixel_init(&dynamixel_servo[0], 0x01, DYNAMIXEL_XL430, &dynamixel_bus));
-	DYNAMIXEL_ERROR_CHECK(dynamixel_init(&dynamixel_servo[1], 0x02, DYNAMIXEL_XL430, &dynamixel_bus));
-	DYNAMIXEL_ERROR_CHECK(dynamixel_init(&dynamixel_servo[2], 0x03, DYNAMIXEL_XL430, &dynamixel_bus));
-
-    for (int i = 0; i < 3; i++) {
-        printf("Activating servo %d...\r\n", i);
-        dynamixel_ping(&dynamixel_servo[i]);
-        dynamixel_set_torque_enable(&dynamixel_servo[i], 1);
-        dynamixel_set_led(&dynamixel_servo[i], 1);
-    }
-
-    HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_RESET);
-    osDelay(pdMS_TO_TICKS(1000));
-    HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_SET);
-
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_RESET);
-    osDelay(pdMS_TO_TICKS(1000));
+    DYNAMIXEL_ERROR_CHECK(dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, &dynamixel_uart_context));
+    for (int i = 0; i < 3 * 6; i++) {
+        printf("Configuring Servo %d...\r\n", i);
+
+        DYNAMIXEL_ERROR_CHECK(dynamixel_init(&dynamixel_servo[i], i + 1, DYNAMIXEL_XL430, &dynamixel_bus));
+        DYNAMIXEL_ERROR_CHECK(dynamixel_ping(&dynamixel_servo[i]));
+        DYNAMIXEL_ERROR_CHECK(dynamixel_set_torque_enable(&dynamixel_servo[i], 1));
+        DYNAMIXEL_ERROR_CHECK(dynamixel_set_led(&dynamixel_servo[i], 1));
+    }
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
 
     HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_RESET);
-    osDelay(pdMS_TO_TICKS(1000));
-    HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_SET);
-
-    osDelay(pdMS_TO_TICKS(1000));
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
@@ -969,6 +961,8 @@ void StartDefaultTask(void *argument) {
         current_leg_state->grounded = 1; // All legs assumed to be grounded, STANDUP will take care of that
     }
 
+    HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_SET);
+
     uint16_t powerdown_timeout = POWERDOWN_TIMEOUT;
 
     /* Infinite loop */
@@ -995,7 +989,7 @@ void StartDefaultTask(void *argument) {
         // State machine
         if (motion_state != next_state) {
             printf("Transitioning to motion state %d\r\n", motion_state);
-            switch (motion_state) {
+            switch (next_state) {
                 case SYNCING:
                     // No transition
                     break;
@@ -1009,7 +1003,7 @@ void StartDefaultTask(void *argument) {
                     // No transition
                     break;
                 case POWERDOWN:
-                    for (int i = 0; i < 3; i++) {
+                    for (int i = 0; i < 3 * 6; i++) {
                         printf("Deactivating servo %d...\r\n", i);
                         dynamixel_set_torque_enable(&dynamixel_servo[i], 0);
                         dynamixel_set_led(&dynamixel_servo[i], 0);
@@ -1020,14 +1014,14 @@ void StartDefaultTask(void *argument) {
         }
 
         // Determine the actual servo positions
-        // Until we have all legs just copy the next to actual for the other legs
+        float32_t servo_angles[3*6];
+        read_actual_servo_position(dynamixel_servo, 3*6, servo_angles);
         for (int i = 0; i < 6; i++) {
-            if (i == 1)
-                continue;
-            arm_vec_copy_f32(robot_state.leg_state[i].next_joint_angles, robot_state.leg_state[i].actual_joint_angles,
-                             3);
+            // Compensate angles for geometry
+            robot_state.leg_state[i].actual_joint_angles[i * 3 + 0] = servo_angles[i * 3 + 0];
+            robot_state.leg_state[i].actual_joint_angles[i * 3 + 1] = -servo_angles[i * 3 + 1];
+            robot_state.leg_state[i].actual_joint_angles[i * 3 + 2] = servo_angles[i * 3 + 2] + D2R(25);
         }
-        read_actual_servo_position(dynamixel_servo, 3, robot_state.leg_state[1].actual_joint_angles);
 
         if (motion_state == SYNCING) {
             // Make sure actual and next angles are set to the same value
@@ -1217,7 +1211,14 @@ void StartDefaultTask(void *argument) {
         }
 
         // Write next values to the servos
-        write_next_servo_position(dynamixel_servo, 3, robot_state.leg_state[1].next_joint_angles);
+        float32_t next_position[3*6];
+        for (int i = 0; i < 6; i++) {
+            // Compensate angles for geometry
+            next_position[i*3+0] = robot_state.leg_state[i].next_joint_angles[0];
+            next_position[i*3+0] = -robot_state.leg_state[i].actual_joint_angles[1];
+            next_position[i*3+0] = robot_state.leg_state[i].actual_joint_angles[2] - D2R(25);
+        }
+        write_next_servo_position(dynamixel_servo, 3*6, next_position);
 
         HAL_GPIO_TogglePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin);
 
