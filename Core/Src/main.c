@@ -49,6 +49,7 @@
 #include "calculator.h"
 #include "servos.h"
 #include "log.h"
+#include "dynamixel/protocol.h"
 
 /* USER CODE END Includes */
 
@@ -781,21 +782,42 @@ void stm32_bno055_delay_us(u32 period) {
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
-    if (huart == &huart6 && servoCallbackThreadId != 0) {
-        osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_TX_CPLT);
+    if (huart != &huart6) {
+        return;
     }
+
+    if (servoCallbackThreadId == NULL) {
+        LOG_DEBUG("HAL_UART_ErrorCallback: huart6 TxCplt callback, but no servoCallbackThreadId set\r\n");
+        return;
+    }
+
+    osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_TX_CPLT);
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-    if (huart == &huart6 && servoCallbackThreadId != 0) {
-        osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_RX_CPLT);
+    if (huart != &huart6) {
+        return;
     }
+
+    if (servoCallbackThreadId == NULL) {
+        LOG_DEBUG("HAL_UART_ErrorCallback: huart6 RxCplt callback, but no servoCallbackThreadId set\r\n");
+        return;
+    }
+
+    osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_RX_CPLT);
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
-    if (huart == &huart6 && servoCallbackThreadId != 0) {
-        osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_ERR);
+    if (huart != &huart6) {
+        return;
     }
+
+    if (servoCallbackThreadId == NULL) {
+        LOG_DEBUG("HAL_UART_ErrorCallback: huart6 error, but no servoCallbackThreadId set\r\n");
+        return;
+    }
+
+    osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_ERR);
 }
 /* USER CODE END 4 */
 
@@ -897,12 +919,18 @@ void StartDefaultTask(void *argument) {
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_RESET);
     DYNAMIXEL_ERROR_CHECK(dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, &dynamixel_uart_context));
     for (int i = 0; i < 3 * 6; i++) {
-        printf("Configuring Servo %d...\r\n", i);
+        LOG_INFO("Configuring Servo %d...\r\n", i);
 
         DYNAMIXEL_ERROR_CHECK(dynamixel_init(&dynamixel_servo[i], i + 1, DYNAMIXEL_XL430, &dynamixel_bus));
-        DYNAMIXEL_ERROR_CHECK(dynamixel_ping(&dynamixel_servo[i]));
-        DYNAMIXEL_ERROR_CHECK(dynamixel_set_torque_enable(&dynamixel_servo[i], 1));
-        DYNAMIXEL_ERROR_CHECK(dynamixel_set_led(&dynamixel_servo[i], 1));
+
+        dynamixel_error_t res = dynamixel_ping(&dynamixel_servo[i]);
+        if (res != DYNAMIXEL_ERROR_NONE) {
+            LOG_ERROR("dynamixel_ping failed: %d\r\n", res);
+            continue;
+        }
+
+        dynamixel_set_torque_enable(&dynamixel_servo[i], 1);
+        dynamixel_set_led(&dynamixel_servo[i], 1);
     }
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
 
