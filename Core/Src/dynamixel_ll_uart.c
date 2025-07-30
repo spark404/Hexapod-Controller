@@ -23,7 +23,7 @@ ssize_t dynamixel_write_uart_dma(const uint8_t *txBuffer, const size_t size, voi
 	}
 
 	// Wait for the TX complete flag
-	const uint32_t flags = osThreadFlagsWait(DYNAMIXEL_DMA_TX_CPLT | DYNAMIXEL_DMA_ERR, osFlagsWaitAny, pdMS_TO_TICKS(5));
+	const uint32_t flags = osThreadFlagsWait(DYNAMIXEL_DMA_TX_CPLT | DYNAMIXEL_DMA_ERR, osFlagsWaitAny, pdMS_TO_TICKS(50));
 
 	if (flags == (uint32_t)osErrorTimeout) {
 		HAL_UART_DMAStop(huart);
@@ -64,7 +64,7 @@ ssize_t dynamixel_read_uart_dma(uint8_t *rxBuffer, const size_t size, void *pvCo
 	}
 
 	// Wait for the RX complete flag
-	const uint32_t flags = osThreadFlagsWait(DYNAMIXEL_DMA_RX_CPLT | DYNAMIXEL_DMA_ERR, osFlagsWaitAny, pdMS_TO_TICKS(5));
+	const uint32_t flags = osThreadFlagsWait(DYNAMIXEL_DMA_RX_CPLT | DYNAMIXEL_DMA_ERR, osFlagsWaitAny, pdMS_TO_TICKS(15));
 
 	if (flags == (uint32_t)osErrorTimeout) {
 		HAL_UART_DMAStop(huart);

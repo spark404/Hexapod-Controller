@@ -15,6 +15,9 @@ struct leg {
     float32_t mount_point_polar[2];
     /// The angles defined as home position
     float32_t tip_home_angles[3];
+    /// The servos making up this leg's joints, order Coxa, Femur, Tibia.
+    /// Use the actual servo ID
+    uint8_t servos[3];
 };
 
 struct robot {
@@ -52,27 +55,33 @@ const struct robot r = {
     .leg = {
         { // Front Right
             .mount_point_polar = {90, D2R(-55)},
-            .tip_home_angles = {0.0f, 0.0f, D2R(90)}
+            .tip_home_angles = {0.0f, 0.0f, D2R(90)},
+            .servos = {1, 2, 3}
         },
         { // Center Right
             .mount_point_polar = {70, D2R(-90)},
-            .tip_home_angles = {0.0f, 0.0f, D2R(90)}
+            .tip_home_angles = {0.0f, 0.0f, D2R(90)},
+            .servos = {4, 5, 6}
         },
         { // Rear Right
             .mount_point_polar = {90, D2R(-125)},
-            .tip_home_angles = {0.0f, 0.0f, D2R(90)}
+            .tip_home_angles = {0.0f, 0.0f, D2R(90)},
+            .servos = {7, 8, 9}
         },
         { // Front Left
             .mount_point_polar = {90, D2R(55)},
-            .tip_home_angles = {0.0f, 0.0f, D2R(90)}
+            .tip_home_angles = {0.0f, 0.0f, D2R(90)},
+            .servos = {10, 11, 12}
         },
         {
             .mount_point_polar = {70, D2R(90)},
-            .tip_home_angles = {0.0f, 0.0f, D2R(90)}
+            .tip_home_angles = {0.0f, 0.0f, D2R(90)},
+            .servos = {13, 14, 15}
         },
         {
             .mount_point_polar = {90, D2R(125)},
-            .tip_home_angles = {0.0f, 0.0f, D2R(90)}
+            .tip_home_angles = {0.0f, 0.0f, D2R(90)},
+            .servos = {16, 17, 18}
         }
     }
 };

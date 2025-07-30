@@ -82,9 +82,6 @@ typedef struct {
         } \
     } while(0)
 
-#define R2D(R) (R * 57.295779513082323f)
-#define D2R(D) (D * 0.017453292519943f)
-
 #define MATRIX(M,S) \
 arm_matrix_instance_f32 M; \
 float32_t p ## M ## Data[S*S];   \
@@ -123,7 +120,7 @@ DMA_HandleTypeDef hdma_usart6_rx;
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
     .name = "defaultTask",
-    .stack_size = 128 * 32,
+    .stack_size = 128 * 64,
     .priority = (osPriority_t) osPriorityNormal,
 };
 /* USER CODE BEGIN PV */
@@ -941,14 +938,15 @@ void StartDefaultTask(void *argument) {
     struct robot_state robot_state;
 
     typedef enum  {
-        POWERDOWN,
+        BOOT,
         SYNCING,
         STANDUP,
         STANDING,
-        WALKING
+        WALKING,
+        POWERDOWN,
     } state_t ;
 
-    state_t motion_state = SYNCING;
+    state_t motion_state = BOOT;
     state_t next_state = SYNCING;
 
     // Do a bunch of static calculations that depend on the robot configuration in robot.h
@@ -1016,12 +1014,13 @@ void StartDefaultTask(void *argument) {
 
         // State machine
         if (motion_state != next_state) {
-            printf("Transitioning to motion state %d\r\n", motion_state);
+            printf("Transitioning to motion state %d\r\n", next_state);
             switch (next_state) {
                 case SYNCING:
                 case STANDUP:
                 case WALKING:
                 case STANDING:
+                    break;
                 case POWERDOWN:
                     for (int i = 0; i < 3 * 6; i++) {
                         printf("Deactivating servo %d...\r\n", i);
@@ -1034,13 +1033,28 @@ void StartDefaultTask(void *argument) {
         }
 
         // Determine the actual servo positions
-        float32_t servo_angles[3*6];
-        read_actual_servo_position(dynamixel_servo, 3*6, servo_angles);
         for (int i = 0; i < 6; i++) {
+            struct leg_state *current_leg_state = &robot_state.leg_state[i];
+            const struct leg *current_leg = &r.leg[i];
+
+            dynamixel_servo_t leg_servos[3] = {
+                dynamixel_servo[current_leg->servos[0] - 1],
+                dynamixel_servo[current_leg->servos[1] - 1],
+                dynamixel_servo[current_leg->servos[2] - 1],
+            };
+            float32_t leg_servo_angles[3];
+
+            if (read_actual_servo_position(leg_servos, 3, leg_servo_angles) < 0) {
+                LOG_WARN("Failed to read servo position for leg %d\r\n", i);
+                // Use the defined angles as a stop gap
+                arm_vec_copy_f32(robot_state.leg_state[i].next_joint_angles, robot_state.leg_state[i].actual_joint_angles, 3);
+                continue;
+            }
+
             // Compensate angles for geometry
-            robot_state.leg_state[i].actual_joint_angles[0] = servo_angles[i * 3 + 0];
-            robot_state.leg_state[i].actual_joint_angles[1] = -servo_angles[i * 3 + 1];
-            robot_state.leg_state[i].actual_joint_angles[2] = servo_angles[i * 3 + 2] + D2R(25);
+            current_leg_state->actual_joint_angles[0] = leg_servo_angles[0];
+            current_leg_state->actual_joint_angles[1] = -leg_servo_angles[1];
+            current_leg_state->actual_joint_angles[2] = leg_servo_angles[2] + D2R(25);
         }
 
         if (motion_state == SYNCING) {
@@ -1231,14 +1245,24 @@ void StartDefaultTask(void *argument) {
         }
 
         // Write next values to the servos
-        float32_t next_position[3*6];
         for (int i = 0; i < 6; i++) {
+            struct leg_state *current_leg_state = &robot_state.leg_state[i];
+            const struct leg *current_leg = &r.leg[i];
+
+            dynamixel_servo_t leg_servos[3] = {
+                dynamixel_servo[current_leg->servos[0] - 1],
+                dynamixel_servo[current_leg->servos[1] - 1],
+                dynamixel_servo[current_leg->servos[2] - 1],
+            };
+            float32_t leg_servo_angles[3];
+
             // Compensate angles for geometry
-            next_position[i*3+0] = robot_state.leg_state[i].next_joint_angles[0];
-            next_position[i*3+0] = -robot_state.leg_state[i].actual_joint_angles[1];
-            next_position[i*3+0] = robot_state.leg_state[i].actual_joint_angles[2] - D2R(25);
+            leg_servo_angles[0] = current_leg_state->next_joint_angles[0];
+            leg_servo_angles[1] = -current_leg_state->next_joint_angles[1];
+            leg_servo_angles[2] = current_leg_state->next_joint_angles[2] - D2R(25);
+
+            write_next_servo_position(leg_servos, 3, leg_servo_angles);
         }
-        write_next_servo_position(dynamixel_servo, 3*6, next_position);
 
         HAL_GPIO_TogglePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin);
 

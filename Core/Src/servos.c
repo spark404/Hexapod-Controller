@@ -23,13 +23,14 @@ static float32_t pulse_to_angle(uint32_t pulse) {
     return (float) pulse * RAD_PER_PULSE - (float) M_PI;
 }
 
-void read_actual_servo_position(dynamixel_servo_t *servos, const uint8_t servo_count, float32_t *actual_servo_angles) {
+int read_actual_servo_position(dynamixel_servo_t *servos, const uint8_t servo_count, float32_t *actual_servo_angles) {
     // Read actual position
     uint32_t actual_position[servo_count];
     const dynamixel_result_t res = dynamixel_sync_get_long_parameter(servos, XL430_CT_RAM_PRESENT_POSITION,
                                                                actual_position, servo_count);
     if (res != DNM_OK) {
         LOG_ERROR("Failed to get long position using sync read: %d\r\n", res);
+        return -1;
     }
 
     float actual_angle[servo_count];
@@ -38,9 +39,11 @@ void read_actual_servo_position(dynamixel_servo_t *servos, const uint8_t servo_c
     }
 
     arm_vec_copy_f32(actual_angle, actual_servo_angles, servo_count);
+
+    return 0;
 }
 
-void write_next_servo_position(dynamixel_servo_t *servos, uint8_t servo_count, const float32_t *next_servo_angles) {
+int write_next_servo_position(dynamixel_servo_t *servos, uint8_t servo_count, const float32_t *next_servo_angles) {
     uint32_t position_next[servo_count];
     for (int i = 0; i < servo_count; i++) {
         position_next[i] = angle_to_pulse(next_servo_angles[i]);
@@ -49,5 +52,8 @@ void write_next_servo_position(dynamixel_servo_t *servos, uint8_t servo_count, c
 
     if (res != DNM_OK) {
         LOG_ERROR("Failed to write long position using sync write: %d\r\n", res);
+        return -1;
     }
+
+    return 0;
 }
