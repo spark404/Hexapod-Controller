@@ -82,8 +82,8 @@ typedef struct {
         } \
     } while(0)
 
-#define R2D(R) (R * 57.295779513082323)
-#define D2R(D) (D * 0.017453292519943)
+#define R2D(R) (R * 57.295779513082323f)
+#define D2R(D) (D * 0.017453292519943f)
 
 #define MATRIX(M,S) \
 arm_matrix_instance_f32 M; \
@@ -621,20 +621,20 @@ static void MX_GPIO_Init(void) {
     /*Configure GPIO pin Output Level */
     HAL_GPIO_WritePin(GPIOA, ST_LED_B_Pin | ST_LED_R_Pin, GPIO_PIN_RESET);
 
-    /*Configure GPIO pins : SPI2_CS_ACC_Pin SPI2_CS_GYR_Pin ST_LED_G_Pin */
+    /* Configure GPIO pins: SPI2_CS_ACC_Pin SPI2_CS_GYR_Pin ST_LED_G_Pin */
     GPIO_InitStruct.Pin = SPI2_CS_ACC_Pin | SPI2_CS_GYR_Pin | ST_LED_G_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-    /*Configure GPIO pins : SPI2_INT_ACC_Pin SPI2_INT_GYR_Pin */
+    /* Configure GPIO pins: SPI2_INT_ACC_Pin SPI2_INT_GYR_Pin */
     GPIO_InitStruct.Pin = SPI2_INT_ACC_Pin | SPI2_INT_GYR_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    /*Configure GPIO pins : ST_LED_B_Pin ST_LED_R_Pin */
+    /* Configure GPIO pins: ST_LED_B_Pin ST_LED_R_Pin */
     GPIO_InitStruct.Pin = ST_LED_B_Pin | ST_LED_R_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -1019,17 +1019,9 @@ void StartDefaultTask(void *argument) {
             printf("Transitioning to motion state %d\r\n", motion_state);
             switch (next_state) {
                 case SYNCING:
-                    // No transition
-                    break;
                 case STANDUP:
-                    // No transition
-                    break;
                 case WALKING:
-                    // No transition
-                    break;
                 case STANDING:
-                    // No transition
-                    break;
                 case POWERDOWN:
                     for (int i = 0; i < 3 * 6; i++) {
                         printf("Deactivating servo %d...\r\n", i);
@@ -1046,9 +1038,9 @@ void StartDefaultTask(void *argument) {
         read_actual_servo_position(dynamixel_servo, 3*6, servo_angles);
         for (int i = 0; i < 6; i++) {
             // Compensate angles for geometry
-            robot_state.leg_state[i].actual_joint_angles[i * 3 + 0] = servo_angles[i * 3 + 0];
-            robot_state.leg_state[i].actual_joint_angles[i * 3 + 1] = -servo_angles[i * 3 + 1];
-            robot_state.leg_state[i].actual_joint_angles[i * 3 + 2] = servo_angles[i * 3 + 2] + D2R(25);
+            robot_state.leg_state[i].actual_joint_angles[0] = servo_angles[i * 3 + 0];
+            robot_state.leg_state[i].actual_joint_angles[1] = -servo_angles[i * 3 + 1];
+            robot_state.leg_state[i].actual_joint_angles[2] = servo_angles[i * 3 + 2] + D2R(25);
         }
 
         if (motion_state == SYNCING) {
@@ -1195,8 +1187,8 @@ void StartDefaultTask(void *argument) {
                 MATRIX4(Tinv);
                 matrix_3d_invert(&T, &Tinv);
 
-                float32_t velocity = arm_vec_magnitude_f32(movement_vector, 3);
-                float32_t substeps = longest_path / velocity;
+                float32_t movement_velocity = arm_vec_magnitude_f32(movement_vector, 3);
+                float32_t substeps = longest_path / movement_velocity;
 
                 float32_t path_length = calculate_path_length(paths[i]);
                 float32_t step_length = path_length / substeps;
@@ -1211,7 +1203,7 @@ void StartDefaultTask(void *argument) {
                 matrix_3d_vec_transform(&Thexapod_body, p_next_in_body_frame, p_next_in_world_frame);
 
                 if (current_leg_state->grounded) {
-                    // Just use the existing coordinates for the world frame
+                    // Use the existing coordinates for the world frame
                     arm_vec_copy_f32(current_leg_state->tip_world_coordinates, p_next_in_world_frame, 3);
                 } else {
                     remaining_path_length = fmaxf(remaining_path_length, arm_euclidean_distance_f32(p_next_in_body_frame, paths[i][3], 3));
