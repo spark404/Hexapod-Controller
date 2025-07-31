@@ -49,6 +49,7 @@
 #include "calculator.h"
 #include "servos.h"
 #include "log.h"
+#include "semphr.h"
 #include "dynamixel/protocol.h"
 
 /* USER CODE END Includes */
@@ -124,6 +125,15 @@ const osThreadAttr_t defaultTask_attributes = {
     .priority = (osPriority_t) osPriorityNormal,
 };
 /* USER CODE BEGIN PV */
+osThreadId_t spiSlaveTaskHandle;
+const osThreadAttr_t spiSlaveTask_attributes = {
+    .name = "spiSlaveTask",
+    .stack_size = 128 * 16,
+    .priority = (osPriority_t) osPriorityNormal,
+};
+xSemaphoreHandle xSPIRxSemaphore;
+
+
 i2c_intf_ptr bmm350_intf;
 bmm350_t bmm350;
 
@@ -171,6 +181,8 @@ static void MX_TIM1_Init(void);
 void StartDefaultTask(void *argument);
 
 /* USER CODE BEGIN PFP */
+void StartSpiSlaveTask(void *argument);
+
 int __io_putchar(int ch);
 
 BMM350_INTF_RET_TYPE stm32_bmm350_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, void *intf_ptr);
@@ -249,7 +261,7 @@ int main(void) {
     /* USER CODE END RTOS_MUTEX */
 
     /* USER CODE BEGIN RTOS_SEMAPHORES */
-    /* add semaphores, ... */
+    xSPIRxSemaphore = xSemaphoreCreateBinary();
     /* USER CODE END RTOS_SEMAPHORES */
 
     /* USER CODE BEGIN RTOS_TIMERS */
@@ -265,7 +277,7 @@ int main(void) {
     defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
     /* USER CODE BEGIN RTOS_THREADS */
-    /* add threads, ... */
+    spiSlaveTaskHandle = osThreadNew(StartSpiSlaveTask, NULL, &spiSlaveTask_attributes);
     /* USER CODE END RTOS_THREADS */
 
     /* USER CODE BEGIN RTOS_EVENTS */
@@ -643,6 +655,63 @@ static void MX_GPIO_Init(void) {
 }
 
 /* USER CODE BEGIN 4 */
+void StartSpiSlaveTask(void *argument) {
+    (void)argument;
+
+    configASSERT(xSPIRxSemaphore != NULL);
+
+    // Start by receiving the length byte
+    uint8_t receiveStep = 0;
+    uint8_t remainingBytes = 3;
+    uint8_t buffer[256];
+
+
+    for (;;) {
+        // Start length byte reception
+        if (HAL_SPI_Receive_IT(&hspi1, buffer, remainingBytes) != HAL_OK)
+        {
+            LOG_ERROR("HAL_SPI_Receive error\r\n");
+
+            // Wait, reset and try again
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            receiveStep = 0;
+            remainingBytes = 3;
+            continue;
+        }
+
+        if (xSemaphoreTake(xSPIRxSemaphore, portMAX_DELAY) == pdTRUE) {
+            if (receiveStep == 0) {
+                // Check the magic header
+                if (buffer[0] != 0xA5) {
+                    LOG_ERROR("Invalid magic header\r\n");
+                    continue;
+                }
+
+                // Received the length byte
+                receiveStep = 1;
+                remainingBytes = buffer[2];
+            }
+            else if (receiveStep == 1) {
+                // Received the data
+                switch (buffer[0]) {
+                    case 0x01:
+                        // Command set speed
+                        const uint32_t new_velocity = (buffer[1] << 8) | buffer[2];
+                        velocity = (float32_t)new_velocity;
+                        LOG_INFO("Set speed to %5.2f mm/s\r\n", velocity);
+                        break;
+                    default:
+                        LOG_ERROR("Unknown command: 0x%02x\r\n", buffer[0]);
+                        break;
+                }
+
+                receiveStep = 0;
+                remainingBytes = 3;
+            }
+        }
+    }
+}
+
 int __io_putchar(int ch) {
     while (!LL_USART_IsActiveFlag_TXE(USART1)) {
     }
@@ -815,6 +884,30 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
     }
 
     osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_ERR);
+}
+
+// Callback called by HAL when SPI receive complete (in ISR context)
+void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if (hspi != &hspi1) {
+        return;
+    }
+
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+    // Give semaphore to unblock the receive task
+    xSemaphoreGiveFromISR(xSPIRxSemaphore, &xHigherPriorityTaskWoken);
+
+    // Request context switch if needed
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi) {
+    if (hspi != &hspi1) {
+        return;
+    }
+
+    LOG_ERROR("HAL_SPI_ErrorCallback: %ld\r\n", hspi->ErrorCode);
 }
 /* USER CODE END 4 */
 
