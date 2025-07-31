@@ -27,19 +27,19 @@ ssize_t dynamixel_write_uart_dma(const uint8_t *txBuffer, const size_t size, voi
 
 	if (flags == (uint32_t)osErrorTimeout) {
 		HAL_UART_DMAStop(huart);
-		// LOG_DEBUG("dynamixel_write_uart_dma: osThreadFlagsWait timeout\r\n");
+		// LOG_DEBUG("dynamixel_write_uart_dma: osThreadFlagsWait timeout");
 		return -1;
 	}
 
 	if (flags & (1U << 31)) {
 		HAL_UART_DMAStop(huart);
-		LOG_DEBUG("dynamixel_write_uart_dma: osThreadFlagsWait error %d\r\n", flags);
+		LOG_DEBUG("dynamixel_write_uart_dma: osThreadFlagsWait error %d", flags);
 		return -1;
 	}
 
 	if (flags == DYNAMIXEL_DMA_ERR) {
 		HAL_UART_DMAStop(huart);
-		LOG_DEBUG("dynamixel_write_uart_dma: uart error\r\n");
+		LOG_DEBUG("dynamixel_write_uart_dma: uart error");
 		return -1;
 	}
 
@@ -68,19 +68,19 @@ ssize_t dynamixel_read_uart_dma(uint8_t *rxBuffer, const size_t size, void *pvCo
 
 	if (flags == (uint32_t)osErrorTimeout) {
 		HAL_UART_DMAStop(huart);
-		// LOG_DEBUG("dynamixel_read_uart_dma: osThreadFlagsWait timeout\r\n");
+		// LOG_DEBUG("dynamixel_read_uart_dma: osThreadFlagsWait timeout");
 		return -1;
 	}
 
 	if (flags & (1U << 31)) {
 		HAL_UART_DMAStop(huart);
-		LOG_DEBUG("dynamixel_read_uart_dma: osThreadFlagsWait error %d\r\n", flags);
+		LOG_DEBUG("dynamixel_read_uart_dma: osThreadFlagsWait error %d", flags);
 		return -1;
 	}
 
 	if (flags == DYNAMIXEL_DMA_ERR) {
 		HAL_UART_DMAStop(huart);
-		LOG_DEBUG("dynamixel_read_uart_dma: uart error\r\n");
+		LOG_DEBUG("dynamixel_read_uart_dma: uart error");
 		return -1;
 	}
 

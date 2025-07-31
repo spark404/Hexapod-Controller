@@ -78,7 +78,7 @@ typedef struct {
 #define DYNAMIXEL_ERROR_CHECK(x) do { \
         dynamixel_result_t dynamixel_rc_ = (x); \
         if (dynamixel_rc_ != DNM_OK) { \
-            printf("Dynamixel call returned failure %d", dynamixel_rc_); \
+            LOG_ERROR("Dynamixel call returned failure %d", dynamixel_rc_); \
             Error_Handler(); \
         } \
     } while(0)
@@ -655,76 +655,60 @@ static void MX_GPIO_Init(void) {
 void StartSpiSlaveTask(void *argument) {
     (void) argument;
 
-    // Start by receiving the length byte
-    uint8_t receiveStep = 0;
-    uint8_t remainingBytes = 3;
-    uint8_t buffer[256];
-
+    // Message format (7 bytes)
+    //   uint8_t magic
+    //   uint8_t reserved
+    //   uint8_t register
+    //   uint32_t value
+    uint8_t buffer[16];
 
     for (;;) {
-        LOG_INFO("[StartSpiSlaveTask] Waiting for receive...\r\n");
+        LOG_INFO("[StartSpiSlaveTask] Waiting for receive...");
 
         // Start length byte reception
-        if (HAL_SPI_Receive_IT(&hspi1, buffer, remainingBytes) != HAL_OK) {
-            LOG_ERROR("[StartSpiSlaveTask] HAL_SPI_Receive error\r\n");
+        if (HAL_SPI_Receive_IT(&hspi1, buffer, 7) != HAL_OK) {
+            LOG_ERROR("[StartSpiSlaveTask] HAL_SPI_Receive error");
 
             // Wait, reset and try again
             vTaskDelay(pdMS_TO_TICKS(1000));
-            receiveStep = 0;
-            remainingBytes = 3;
             continue;
         }
 
         const uint32_t flags = osThreadFlagsWait(SPI_RX_CPLT | SPI_ERR, osFlagsWaitAny, portMAX_DELAY);
         if (flags == (uint32_t) osErrorTimeout) {
-            LOG_DEBUG("[StartSpiSlaveTask] osThreadFlagsWait timeout\r\n");
-            receiveStep = 0;
-            remainingBytes = 3;
+            LOG_DEBUG("[StartSpiSlaveTask] osThreadFlagsWait timeout");
             continue;
         }
 
         if (flags & (1U << 31)) {
-            LOG_DEBUG("[StartSpiSlaveTask] osThreadFlagsWait error %d\r\n", flags);
+            LOG_DEBUG("[StartSpiSlaveTask] osThreadFlagsWait error %d", flags);
             vTaskDelay(pdMS_TO_TICKS(100));
-            receiveStep = 0;
-            remainingBytes = 3;
             continue;
         }
 
         if (flags == SPI_ERR) {
-            LOG_DEBUG("[StartSpiSlaveTask] receive error\r\n");
+            LOG_DEBUG("[StartSpiSlaveTask] receive error");
             vTaskDelay(pdMS_TO_TICKS(100));
-            receiveStep = 0;
-            remainingBytes = 3;
             continue;
         }
 
-        if (receiveStep == 0) {
-            // Check the magic header
-            if (buffer[0] != 0xA5) {
-                LOG_ERROR("[StartSpiSlaveTask] Invalid magic header: 0x%02x\r\n", buffer[0]);
-                continue;
-            }
+        // Check the magic header
+        if (buffer[0] != 0xA5) {
+            LOG_ERROR("[StartSpiSlaveTask] Invalid magic header: 0x%02x", buffer[0]);
+            continue;
+        }
 
-            // Received the length byte
-            receiveStep = 1;
-            remainingBytes = buffer[2];
-        } else if (receiveStep == 1) {
-            // Received the data
-            switch (buffer[0]) {
-                case 0x01:
-                    // Command set speed
-                    const uint32_t new_velocity = (buffer[1] << 8) | buffer[2];
-                    velocity = (float32_t) new_velocity;
-                    LOG_INFO("[StartSpiSlaveTask] Set speed to %5.2f mm/s\r\n", velocity);
-                    break;
-                default:
-                    LOG_ERROR("[StartSpiSlaveTask] Unknown command: 0x%02x\r\n", buffer[0]);
-                    break;
-            }
-
-            receiveStep = 0;
-            remainingBytes = 3;
+        // Received the data
+        switch (buffer[2]) {
+            case 0x01:
+                // Command set speed
+                const uint32_t new_velocity = (buffer[5] << 8) | buffer[6];
+                velocity = (float32_t) new_velocity;
+                LOG_INFO("[StartSpiSlaveTask] Set speed to %5.2f mm/s", velocity);
+                break;
+            default:
+                LOG_WARN("[StartSpiSlaveTask] Unknown command: 0x%02x", buffer[2]);
+                break;
         }
     }
 }
@@ -870,7 +854,7 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
     }
 
     if (servoCallbackThreadId == NULL) {
-        LOG_DEBUG("HAL_UART_ErrorCallback: huart6 TxCplt callback, but no servoCallbackThreadId set\r\n");
+        LOG_DEBUG("HAL_UART_ErrorCallback: huart6 TxCplt callback, but no servoCallbackThreadId set");
         return;
     }
 
@@ -883,7 +867,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
     }
 
     if (servoCallbackThreadId == NULL) {
-        LOG_DEBUG("HAL_UART_ErrorCallback: huart6 RxCplt callback, but no servoCallbackThreadId set\r\n");
+        LOG_DEBUG("HAL_UART_ErrorCallback: huart6 RxCplt callback, but no servoCallbackThreadId set");
         return;
     }
 
@@ -896,7 +880,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
     }
 
     if (servoCallbackThreadId == NULL) {
-        LOG_DEBUG("HAL_UART_ErrorCallback: huart6 error, but no servoCallbackThreadId set\r\n");
+        LOG_DEBUG("HAL_UART_ErrorCallback: huart6 error, but no servoCallbackThreadId set");
         return;
     }
 
@@ -925,7 +909,7 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi) {
 
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
-    LOG_ERROR("HAL_SPI_ErrorCallback: %ld\r\n", hspi->ErrorCode);
+    LOG_DEBUG("HAL_SPI_ErrorCallback: %ld", hspi->ErrorCode);
 
     // Give semaphore to unblock the receive task
     osThreadFlagsSet(spiSlaveTaskHandle, SPI_ERR);
@@ -946,7 +930,7 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi) {
 void StartDefaultTask(void *argument) {
     /* USER CODE BEGIN 5 */
     (void) argument;
-    printf("Starting device checks\r\n");
+    LOG_INFO("Starting device checks");
 
     HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
@@ -978,18 +962,18 @@ void StartDefaultTask(void *argument) {
 
     int8_t bmi088_res = bmi08g_init(&bmi088);
     if (bmi088_res != 0) {
-        printf("BMI088 gyro initialization failed: %d\r\n", bmi088_res);
+        LOG_ERROR("BMI088 gyro initialization failed: %d", bmi088_res);
         // Error_Handler();
     } else {
-        printf("BMI088 gyro initialization complete!\r\n");
+        LOG_INFO("BMI088 gyro initialization complete!");
     }
 
     bmi088_res = bmi08a_init(&bmi088);
     if (bmi088_res != 0) {
-        printf("BMI088 acc initialization failed: %d\r\n", bmi088_res);
+        LOG_ERROR("BMI088 acc initialization failed: %d", bmi088_res);
         // Error_Handler();
     } else {
-        printf("BMI088 acc initialization complete!\r\n");
+        LOG_INFO("BMI088 acc initialization complete!");
     }
 
     /* Setup BMM350 */
@@ -1002,10 +986,10 @@ void StartDefaultTask(void *argument) {
     bmm350.intf_ptr = &bmm350_intf;
     int8_t bmm350_res = bmm350_init(&bmm350);
     if (bmm350_res != 0) {
-        printf("BMM350 initialization failed: %d\r\n", bmm350_res);
+        LOG_ERROR("BMM350 initialization failed: %d", bmm350_res);
         // Error_Handler();
     } else {
-        printf("BMM350 initialization complete!\r\n");
+        LOG_INFO("BMM350 initialization complete!");
     }
     bmm350_enable_axes(BMM350_X_EN, BMM350_Y_EN, BMM350_Z_EN, &bmm350);
     bmm350_set_powermode(BMM350_NORMAL_MODE, &bmm350);
@@ -1017,9 +1001,9 @@ void StartDefaultTask(void *argument) {
     bno055.dev_addr = 0x28;
     s8 bno055_res = bno055_init(&bno055);
     if (bno055_res != 0) {
-        printf("BNO055 initialization failed: %d\r\n", bno055_res);
+        LOG_ERROR("BNO055 initialization failed: %d", bno055_res);
     } else {
-        printf("BNO055 initialization complete!\r\n");
+        LOG_INFO("BNO055 initialization complete!");
     }
 
     HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_RESET);
@@ -1034,18 +1018,14 @@ void StartDefaultTask(void *argument) {
         dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, &dynamixel_uart_context
         ));
     for (int i = 0; i < 3 * 6; i++) {
-        LOG_INFO("Configuring Servo %d...\r\n", i);
+        LOG_INFO("Configuring Servo %d...", i);
 
         DYNAMIXEL_ERROR_CHECK(dynamixel_init(&dynamixel_servo[i], i + 1, DYNAMIXEL_XL430, &dynamixel_bus));
 
         dynamixel_error_t res = dynamixel_ping(&dynamixel_servo[i]);
         if (res != DYNAMIXEL_ERROR_NONE) {
-            LOG_ERROR("dynamixel_ping failed: %d\r\n", res);
-            continue;
+            LOG_ERROR("dynamixel_ping failed: %d", res);
         }
-
-        dynamixel_set_torque_enable(&dynamixel_servo[i], 1);
-        dynamixel_set_led(&dynamixel_servo[i], 1);
     }
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
 
@@ -1114,7 +1094,7 @@ void StartDefaultTask(void *argument) {
         HAL_GPIO_TogglePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin);
 
         // Rules for transitions
-        if (motion_state != SYNCING && motion_state != POWERDOWN) {
+        if (motion_state == STANDING) {
             if (powerdown_timeout == 0) {
                 next_state = POWERDOWN;
             } else {
@@ -1122,6 +1102,9 @@ void StartDefaultTask(void *argument) {
             }
         } else {
             powerdown_timeout = POWERDOWN_TIMEOUT;
+        }
+        if (motion_state == POWERDOWN && velocity > 0.0f) {
+            next_state = SYNCING;
         }
         if (motion_state == STANDING && velocity > 0.0f) {
             next_state = WALKING;
@@ -1132,19 +1115,23 @@ void StartDefaultTask(void *argument) {
 
         // State machine
         if (motion_state != next_state) {
-            printf("Transitioning to motion state %d\r\n", next_state);
+            LOG_INFO("Transitioning to motion state %d", next_state);
             switch (next_state) {
                 case SYNCING:
-                case STANDUP:
-                case WALKING:
-                case STANDING:
+                    for (int i = 0; i < 3 * 6; i++) {
+                        LOG_INFO("Activating servo %d...", i);
+                        dynamixel_set_torque_enable(&dynamixel_servo[i], 1);
+                        dynamixel_set_led(&dynamixel_servo[i], 1);
+                    }
                     break;
                 case POWERDOWN:
                     for (int i = 0; i < 3 * 6; i++) {
-                        printf("Deactivating servo %d...\r\n", i);
+                        LOG_INFO("Deactivating servo %d...", i);
                         dynamixel_set_torque_enable(&dynamixel_servo[i], 0);
                         dynamixel_set_led(&dynamixel_servo[i], 0);
                     }
+                    break;
+                default:
                     break;
             }
             motion_state = next_state;
@@ -1236,7 +1223,7 @@ void StartDefaultTask(void *argument) {
             }
 
             if (re_init) {
-                printf("(Re)Initializing tripod gait\r\n");
+                LOG_INFO("(Re)Initializing tripod gait");
                 robot_state.leg_state[1].grounded = 0;
                 robot_state.leg_state[3].grounded = 0;
                 robot_state.leg_state[5].grounded = 0;
@@ -1337,7 +1324,7 @@ void StartDefaultTask(void *argument) {
                 } else {
                     remaining_path_length = fmaxf(remaining_path_length,
                                                   arm_euclidean_distance_f32(p_next_in_body_frame, paths[i][3], 3));
-                    printf("%d Remaining: %5.2f %5.2f\r\n", i, remaining_path_length, prev_remaining[i]);
+                    // LOG_DEBUG("%d Remaining: %5.2f %5.2f", i, remaining_path_length, prev_remaining[i]);
                     prev_remaining[i] = remaining_path_length;
                     arm_vec_copy_f32(p_next_in_world_frame, current_leg_state->tip_world_coordinates, 3);
                 }
@@ -1350,7 +1337,7 @@ void StartDefaultTask(void *argument) {
             }
 
             if (remaining_path_length < CLOSE_BY_THRESHOLD) {
-                printf("Swap\r\n");
+                LOG_DEBUG("Swap");
                 for (int i = 0; i < 6; i++) {
                     struct leg_state *current_leg_state = &robot_state.leg_state[i];
                     current_leg_state->grounded = !current_leg_state->grounded;

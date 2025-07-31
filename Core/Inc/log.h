@@ -18,6 +18,9 @@ typedef enum {
 #define LOG_DEFAULT_LEVEL LOG_LEVEL_DEBUG
 #endif
 
+// Enable to print file and line for each log line
+// #define LOG_WITH_FILE_AND_LINE
+
 // Allow overriding
 extern int g_log_level;
 
@@ -32,13 +35,24 @@ static inline const char* log_level_str(log_level_t level) {
     }
 }
 
+#ifdef LOG_WITH_FILE_AND_LINE
 #define log_printf(level, fmt, ...) \
 do { \
 if ((level) >= g_log_level) { \
-printf("[%s:%d][%s] " fmt "\n", \
+printf("[%s:%d][%s] " fmt "\r\n", \
 __FILE__, __LINE__, log_level_str(level), ##__VA_ARGS__); \
 } \
 } while(0)
+#else
+#define log_printf(level, fmt, ...) \
+do { \
+if ((level) >= g_log_level) { \
+printf("[%s] " fmt "\r\n", \
+log_level_str(level), ##__VA_ARGS__); \
+} \
+} while(0)
+#endif
+
 
 #define LOG_DEBUG(fmt, ...)   log_printf(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
 #define LOG_INFO(fmt, ...)    log_printf(LOG_LEVEL_INFO,  fmt, ##__VA_ARGS__)
