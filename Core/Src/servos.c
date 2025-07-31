@@ -29,7 +29,7 @@ int read_actual_servo_position(dynamixel_servo_t *servos, const uint8_t servo_co
     const dynamixel_result_t res = dynamixel_sync_get_long_parameter(servos, XL430_CT_RAM_PRESENT_POSITION,
                                                                actual_position, servo_count);
     if (res != DNM_OK) {
-        LOG_ERROR("Failed to get long position using sync read: %d\r\n", res);
+        // LOG_ERROR("Failed to get long position using sync read: %d\r\n", res);
         return -1;
     }
 

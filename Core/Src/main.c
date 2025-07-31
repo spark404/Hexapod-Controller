@@ -131,8 +131,6 @@ const osThreadAttr_t spiSlaveTask_attributes = {
     .stack_size = 128 * 16,
     .priority = (osPriority_t) osPriorityNormal,
 };
-xSemaphoreHandle xSPIRxSemaphore;
-
 
 i2c_intf_ptr bmm350_intf;
 bmm350_t bmm350;
@@ -146,7 +144,7 @@ bno055_tt bno055;
 
 dynamixel_ll_uart_context dynamixel_uart_context;
 dynamixel_bus_t dynamixel_bus;
-dynamixel_servo_t dynamixel_servo[3*6];
+dynamixel_servo_t dynamixel_servo[3 * 6];
 
 volatile osThreadId_t servoCallbackThreadId;
 
@@ -261,7 +259,6 @@ int main(void) {
     /* USER CODE END RTOS_MUTEX */
 
     /* USER CODE BEGIN RTOS_SEMAPHORES */
-    xSPIRxSemaphore = xSemaphoreCreateBinary();
     /* USER CODE END RTOS_SEMAPHORES */
 
     /* USER CODE BEGIN RTOS_TIMERS */
@@ -630,20 +627,20 @@ static void MX_GPIO_Init(void) {
     /*Configure GPIO pin Output Level */
     HAL_GPIO_WritePin(GPIOA, ST_LED_B_Pin | ST_LED_R_Pin, GPIO_PIN_RESET);
 
-    /* Configure GPIO pins: SPI2_CS_ACC_Pin SPI2_CS_GYR_Pin ST_LED_G_Pin */
+    /*Configure GPIO pins : SPI2_CS_ACC_Pin SPI2_CS_GYR_Pin ST_LED_G_Pin */
     GPIO_InitStruct.Pin = SPI2_CS_ACC_Pin | SPI2_CS_GYR_Pin | ST_LED_G_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-    /* Configure GPIO pins: SPI2_INT_ACC_Pin SPI2_INT_GYR_Pin */
+    /*Configure GPIO pins : SPI2_INT_ACC_Pin SPI2_INT_GYR_Pin */
     GPIO_InitStruct.Pin = SPI2_INT_ACC_Pin | SPI2_INT_GYR_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    /* Configure GPIO pins: ST_LED_B_Pin ST_LED_R_Pin */
+    /*Configure GPIO pins : ST_LED_B_Pin ST_LED_R_Pin */
     GPIO_InitStruct.Pin = ST_LED_B_Pin | ST_LED_R_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -656,9 +653,7 @@ static void MX_GPIO_Init(void) {
 
 /* USER CODE BEGIN 4 */
 void StartSpiSlaveTask(void *argument) {
-    (void)argument;
-
-    configASSERT(xSPIRxSemaphore != NULL);
+    (void) argument;
 
     // Start by receiving the length byte
     uint8_t receiveStep = 0;
@@ -667,10 +662,11 @@ void StartSpiSlaveTask(void *argument) {
 
 
     for (;;) {
+        LOG_INFO("[StartSpiSlaveTask] Waiting for receive...\r\n");
+
         // Start length byte reception
-        if (HAL_SPI_Receive_IT(&hspi1, buffer, remainingBytes) != HAL_OK)
-        {
-            LOG_ERROR("HAL_SPI_Receive error\r\n");
+        if (HAL_SPI_Receive_IT(&hspi1, buffer, remainingBytes) != HAL_OK) {
+            LOG_ERROR("[StartSpiSlaveTask] HAL_SPI_Receive error\r\n");
 
             // Wait, reset and try again
             vTaskDelay(pdMS_TO_TICKS(1000));
@@ -679,35 +675,56 @@ void StartSpiSlaveTask(void *argument) {
             continue;
         }
 
-        if (xSemaphoreTake(xSPIRxSemaphore, portMAX_DELAY) == pdTRUE) {
-            if (receiveStep == 0) {
-                // Check the magic header
-                if (buffer[0] != 0xA5) {
-                    LOG_ERROR("Invalid magic header\r\n");
-                    continue;
-                }
+        const uint32_t flags = osThreadFlagsWait(SPI_RX_CPLT | SPI_ERR, osFlagsWaitAny, portMAX_DELAY);
+        if (flags == (uint32_t) osErrorTimeout) {
+            LOG_DEBUG("[StartSpiSlaveTask] osThreadFlagsWait timeout\r\n");
+            receiveStep = 0;
+            remainingBytes = 3;
+            continue;
+        }
 
-                // Received the length byte
-                receiveStep = 1;
-                remainingBytes = buffer[2];
-            }
-            else if (receiveStep == 1) {
-                // Received the data
-                switch (buffer[0]) {
-                    case 0x01:
-                        // Command set speed
-                        const uint32_t new_velocity = (buffer[1] << 8) | buffer[2];
-                        velocity = (float32_t)new_velocity;
-                        LOG_INFO("Set speed to %5.2f mm/s\r\n", velocity);
-                        break;
-                    default:
-                        LOG_ERROR("Unknown command: 0x%02x\r\n", buffer[0]);
-                        break;
-                }
+        if (flags & (1U << 31)) {
+            LOG_DEBUG("[StartSpiSlaveTask] osThreadFlagsWait error %d\r\n", flags);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            receiveStep = 0;
+            remainingBytes = 3;
+            continue;
+        }
 
-                receiveStep = 0;
-                remainingBytes = 3;
+        if (flags == SPI_ERR) {
+            LOG_DEBUG("[StartSpiSlaveTask] receive error\r\n");
+            vTaskDelay(pdMS_TO_TICKS(100));
+            receiveStep = 0;
+            remainingBytes = 3;
+            continue;
+        }
+
+        if (receiveStep == 0) {
+            // Check the magic header
+            if (buffer[0] != 0xA5) {
+                LOG_ERROR("[StartSpiSlaveTask] Invalid magic header: 0x%02x\r\n", buffer[0]);
+                continue;
             }
+
+            // Received the length byte
+            receiveStep = 1;
+            remainingBytes = buffer[2];
+        } else if (receiveStep == 1) {
+            // Received the data
+            switch (buffer[0]) {
+                case 0x01:
+                    // Command set speed
+                    const uint32_t new_velocity = (buffer[1] << 8) | buffer[2];
+                    velocity = (float32_t) new_velocity;
+                    LOG_INFO("[StartSpiSlaveTask] Set speed to %5.2f mm/s\r\n", velocity);
+                    break;
+                default:
+                    LOG_ERROR("[StartSpiSlaveTask] Unknown command: 0x%02x\r\n", buffer[0]);
+                    break;
+            }
+
+            receiveStep = 0;
+            remainingBytes = 3;
         }
     }
 }
@@ -760,7 +777,7 @@ BMM350_INTF_RET_TYPE stm32_bmm350_write(uint8_t reg_addr, const uint8_t *reg_dat
 }
 
 void stm32_bmm350_delay_us(uint32_t period, void *intf_ptr) {
-    (void)intf_ptr;
+    (void) intf_ptr;
     // htim1 setup, prescaler 16-1, ARR 0xffff-1
     __HAL_TIM_SET_COUNTER(&htim1, 0); // set the counter value a 0
     while (__HAL_TIM_GET_COUNTER(&htim1) < period); // wait for the counter to reach the us input in the parameter
@@ -807,7 +824,7 @@ BMI08_INTF_RET_TYPE stm32_bmi08_write(uint8_t reg_addr, const uint8_t *reg_data,
 }
 
 void stm32_bmi08_delay_us(uint32_t period, void *intf_ptr) {
-    (void)intf_ptr;
+    (void) intf_ptr;
     // htim1 setup, prescaler 16-1, ARR 0xffff-1
     __HAL_TIM_SET_COUNTER(&htim1, 0); // set the counter value a 0
     while (__HAL_TIM_GET_COUNTER(&htim1) < period); // wait for the counter to reach the us input in the parameter
@@ -887,8 +904,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
 }
 
 // Callback called by HAL when SPI receive complete (in ISR context)
-void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
-{
+void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi) {
     if (hspi != &hspi1) {
         return;
     }
@@ -896,7 +912,7 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
     // Give semaphore to unblock the receive task
-    xSemaphoreGiveFromISR(xSPIRxSemaphore, &xHigherPriorityTaskWoken);
+    osThreadFlagsSet(spiSlaveTaskHandle, SPI_RX_CPLT);
 
     // Request context switch if needed
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
@@ -907,11 +923,18 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi) {
         return;
     }
 
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
     LOG_ERROR("HAL_SPI_ErrorCallback: %ld\r\n", hspi->ErrorCode);
+
+    // Give semaphore to unblock the receive task
+    osThreadFlagsSet(spiSlaveTaskHandle, SPI_ERR);
+
+    // Request context switch if needed
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
+
 /* USER CODE END 4 */
-
-
 
 /* USER CODE BEGIN Header_StartDefaultTask */
 /**
@@ -922,7 +945,7 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi) {
 /* USER CODE END Header_StartDefaultTask */
 void StartDefaultTask(void *argument) {
     /* USER CODE BEGIN 5 */
-    (void)argument;
+    (void) argument;
     printf("Starting device checks\r\n");
 
     HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_SET);
@@ -950,7 +973,7 @@ void StartDefaultTask(void *argument) {
     bmi088.intf_ptr_accel = &bmi088_acc_intf;
     bmi088.intf_ptr_gyro = &bmi088_gyr_intf;
 
-    float32_t prev_remaining[6] = {0,0,0};
+    float32_t prev_remaining[6] = {0, 0, 0};
 
 
     int8_t bmi088_res = bmi08g_init(&bmi088);
@@ -1007,7 +1030,9 @@ void StartDefaultTask(void *argument) {
     dynamixel_uart_context.callerThread = osThreadGetId();
 
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_RESET);
-    DYNAMIXEL_ERROR_CHECK(dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, &dynamixel_uart_context));
+    DYNAMIXEL_ERROR_CHECK(
+        dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, &dynamixel_uart_context
+        ));
     for (int i = 0; i < 3 * 6; i++) {
         LOG_INFO("Configuring Servo %d...\r\n", i);
 
@@ -1030,14 +1055,14 @@ void StartDefaultTask(void *argument) {
 
     struct robot_state robot_state;
 
-    typedef enum  {
+    typedef enum {
         BOOT,
         SYNCING,
         STANDUP,
         STANDING,
         WALKING,
         POWERDOWN,
-    } state_t ;
+    } state_t;
 
     state_t motion_state = BOOT;
     state_t next_state = SYNCING;
@@ -1064,8 +1089,8 @@ void StartDefaultTask(void *argument) {
 
         convert_2d_polar_to_cartesian(current_leg->mount_point_polar, mount_point_xy);
         pose_set(&current_leg_state->coxa_body_joint,
-            mount_point_xy[0], mount_point_xy[1], 0.0f,
-            0.0f, 0.0f, current_leg->mount_point_polar[1]);
+                 mount_point_xy[0], mount_point_xy[1], 0.0f,
+                 0.0f, 0.0f, current_leg->mount_point_polar[1]);
 
         pose_get_transformation(&current_leg_state->coxa_body_joint, &current_leg_state->coxa_mat);
         matrix_3d_invert(&current_leg_state->coxa_mat, &current_leg_state->coxa_mat_inv);
@@ -1138,9 +1163,10 @@ void StartDefaultTask(void *argument) {
             float32_t leg_servo_angles[3];
 
             if (read_actual_servo_position(leg_servos, 3, leg_servo_angles) < 0) {
-                LOG_WARN("Failed to read servo position for leg %d\r\n", i);
+                // LOG_WARN("Failed to read servo position for leg %d\r\n", i);
                 // Use the defined angles as a stop gap
-                arm_vec_copy_f32(robot_state.leg_state[i].next_joint_angles, robot_state.leg_state[i].actual_joint_angles, 3);
+                arm_vec_copy_f32(robot_state.leg_state[i].next_joint_angles,
+                                 robot_state.leg_state[i].actual_joint_angles, 3);
                 continue;
             }
 
@@ -1153,7 +1179,8 @@ void StartDefaultTask(void *argument) {
         if (motion_state == SYNCING) {
             // Make sure actual and next angles are set to the same value
             for (int i = 0; i < 6; i++) {
-                arm_vec_copy_f32(robot_state.leg_state[i].actual_joint_angles, robot_state.leg_state[i].next_joint_angles, 3);
+                arm_vec_copy_f32(robot_state.leg_state[i].actual_joint_angles,
+                                 robot_state.leg_state[i].next_joint_angles, 3);
             }
             next_state = STANDUP;
         } else if (motion_state == STANDUP) {
@@ -1178,19 +1205,13 @@ void StartDefaultTask(void *argument) {
                 float32_t p_next_in_body_frame[3];
                 float32_t p_next_in_coxa_frame[3];
                 float32_t distance_remaining;
-                calculate_motion_step(&motion_param, p_current_in_body_frame, p_target_in_body_frame, MAIN_LOOP_INTERVAL / 1000,
-                    p_next_in_body_frame, &distance_remaining);
+                calculate_motion_step(&motion_param, p_current_in_body_frame, p_target_in_body_frame,
+                                      MAIN_LOOP_INTERVAL / 1000,
+                                      p_next_in_body_frame, &distance_remaining);
 
                 float32_t origin[3] = {0.0f, 0.0f, 0.0f};
                 matrix_3d_vec_transform(&current_leg_state->coxa_mat_inv, p_next_in_body_frame, p_next_in_coxa_frame);
                 inverse_kinematics(origin, p_next_in_coxa_frame, current_leg_state->next_joint_angles);
-
-                if (i == 1) {
-                    printf("C: %5.2f %5.2f %5.2f\r\n", p_current_in_body_frame[0], p_current_in_body_frame[1], p_current_in_body_frame[2]);
-                    printf("N: %5.2f %5.2f %5.2f\r\n", p_next_in_body_frame[0], p_next_in_body_frame[1], p_next_in_body_frame[2]);
-                    printf("T: %5.2f %5.2f %5.2f\r\n", p_target_in_body_frame[0], p_target_in_body_frame[1], p_target_in_body_frame[2]);
-                    printf("Distance remaining %5.2f\r\n", distance_remaining);
-                }
 
                 if (distance_remaining > CLOSE_BY_THRESHOLD) {
                     ready = 0;
@@ -1234,7 +1255,7 @@ void StartDefaultTask(void *argument) {
             }
 
             // Determine the movement
-            float32_t motion_vector[3] = { velocity * arm_cos_f32(heading), velocity * arm_sin_f32(heading), 0};
+            float32_t motion_vector[3] = {velocity * arm_cos_f32(heading), velocity * arm_sin_f32(heading), 0};
             float32_t movement_vector[3];
             arm_vec_mult_scalar_f32(motion_vector, MAIN_LOOP_INTERVAL / 1000, movement_vector, 3);
 
@@ -1275,7 +1296,8 @@ void StartDefaultTask(void *argument) {
                     arm_vec_copy_f32(p_current_in_body_frame, paths[i][2], 3);
                     arm_vec_copy_f32(p_target_in_body_frame, paths[i][3], 3);
 
-                    float32_t path_length = arm_euclidean_distance_f32(p_current_in_body_frame, p_target_in_body_frame, 3);
+                    float32_t path_length = arm_euclidean_distance_f32(p_current_in_body_frame, p_target_in_body_frame,
+                                                                       3);
                     longest_path = fmaxf(path_length, longest_path);
                 } else {
                     float32_t point[2];
@@ -1286,7 +1308,7 @@ void StartDefaultTask(void *argument) {
                 }
             }
 
-            for (int i = 0; i<6; i++) {
+            for (int i = 0; i < 6; i++) {
                 struct leg_state *current_leg_state = &robot_state.leg_state[i];
 
                 MATRIX4(T);
@@ -1313,10 +1335,11 @@ void StartDefaultTask(void *argument) {
                     // Use the existing coordinates for the world frame
                     arm_vec_copy_f32(current_leg_state->tip_world_coordinates, p_next_in_world_frame, 3);
                 } else {
-                    remaining_path_length = fmaxf(remaining_path_length, arm_euclidean_distance_f32(p_next_in_body_frame, paths[i][3], 3));
+                    remaining_path_length = fmaxf(remaining_path_length,
+                                                  arm_euclidean_distance_f32(p_next_in_body_frame, paths[i][3], 3));
                     printf("%d Remaining: %5.2f %5.2f\r\n", i, remaining_path_length, prev_remaining[i]);
                     prev_remaining[i] = remaining_path_length;
-                    arm_vec_copy_f32(p_next_in_world_frame, current_leg_state->tip_world_coordinates,  3);
+                    arm_vec_copy_f32(p_next_in_world_frame, current_leg_state->tip_world_coordinates, 3);
                 }
 
                 float32_t p_next_in_coxa_frame[3];
@@ -1324,17 +1347,15 @@ void StartDefaultTask(void *argument) {
 
                 float32_t origin[3] = {0, 0, 0};
                 inverse_kinematics(origin, p_next_in_coxa_frame, robot_state.leg_state[i].next_joint_angles);
-
             }
 
             if (remaining_path_length < CLOSE_BY_THRESHOLD) {
                 printf("Swap\r\n");
-                for (int i = 0; i<6; i++) {
+                for (int i = 0; i < 6; i++) {
                     struct leg_state *current_leg_state = &robot_state.leg_state[i];
                     current_leg_state->grounded = !current_leg_state->grounded;
                 }
             }
-
         }
 
         // Write next values to the servos
