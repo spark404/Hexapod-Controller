@@ -148,7 +148,7 @@ dynamixel_servo_t dynamixel_servo[3 * 6];
 
 volatile osThreadId_t servoCallbackThreadId;
 
-float32_t velocity = 50; // mm/s
+float32_t velocity = 0.0f; // mm/s
 float32_t heading = 0.0f; // rad
 
 /* USER CODE END PV */
@@ -1089,9 +1089,13 @@ void StartDefaultTask(void *argument) {
 
     uint16_t powerdown_timeout = POWERDOWN_TIMEOUT;
 
+    uint8_t led_state[3] = {1, 0, 0};
+
     /* Infinite loop */
     for (;;) {
-        HAL_GPIO_TogglePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin);
+        HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, led_state[0]);
+        HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, led_state[1]);
+        HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, led_state[2]);
 
         // Rules for transitions
         if (motion_state == STANDING) {
@@ -1123,6 +1127,9 @@ void StartDefaultTask(void *argument) {
                         dynamixel_set_torque_enable(&dynamixel_servo[i], 1);
                         dynamixel_set_led(&dynamixel_servo[i], 1);
                     }
+                    led_state[0] = 1;
+                    led_state[1] = 0;
+                    led_state[2] = 0;
                     break;
                 case POWERDOWN:
                     for (int i = 0; i < 3 * 6; i++) {
@@ -1130,6 +1137,24 @@ void StartDefaultTask(void *argument) {
                         dynamixel_set_torque_enable(&dynamixel_servo[i], 0);
                         dynamixel_set_led(&dynamixel_servo[i], 0);
                     }
+                    led_state[0] = 0;
+                    led_state[1] = 1;
+                    led_state[2] = 1;
+                    break;
+                case STANDUP:
+                    led_state[0] = 1;
+                    led_state[1] = 0;
+                    led_state[2] = 1;
+                    break;
+                case STANDING:
+                    led_state[0] = 0;
+                    led_state[1] = 1;
+                    led_state[2] = 0;
+                    break;
+                case WALKING:
+                    led_state[0] = 0;
+                    led_state[1] = 0;
+                    led_state[2] = 1;
                     break;
                 default:
                     break;
@@ -1147,20 +1172,37 @@ void StartDefaultTask(void *argument) {
                 dynamixel_servo[current_leg->servos[1] - 1],
                 dynamixel_servo[current_leg->servos[2] - 1],
             };
-            float32_t leg_servo_angles[3];
+            float32_t measured_leg_servo_angles[3];
 
-            if (read_actual_servo_position(leg_servos, 3, leg_servo_angles) < 0) {
+            if (read_actual_servo_position(leg_servos, 3, measured_leg_servo_angles) < 0) {
                 // LOG_WARN("Failed to read servo position for leg %d\r\n", i);
                 // Use the defined angles as a stop gap
+                // FIXME, these angles are uncompensated
                 arm_vec_copy_f32(robot_state.leg_state[i].next_joint_angles,
                                  robot_state.leg_state[i].actual_joint_angles, 3);
                 continue;
             }
 
             // Compensate angles for geometry
-            current_leg_state->actual_joint_angles[0] = leg_servo_angles[0];
-            current_leg_state->actual_joint_angles[1] = -leg_servo_angles[1];
-            current_leg_state->actual_joint_angles[2] = leg_servo_angles[2] + D2R(25);
+            if (motion_state == SYNCING) {
+                // We exclusive use the measured position
+                current_leg_state->actual_joint_angles[0] = measured_leg_servo_angles[0];
+                current_leg_state->actual_joint_angles[1] = -measured_leg_servo_angles[1];
+                current_leg_state->actual_joint_angles[2] = measured_leg_servo_angles[2] + D2R(25);
+            } else {
+                // We use a mix of the calculated angle and the measured angle to offset any measurement error
+                // and compensate for a bit of deadzone at low speeds
+                // Use alpha to tune the mix
+                float32_t compensated_angles[3] = {
+                    measured_leg_servo_angles[0],
+                    -measured_leg_servo_angles[1],
+                    measured_leg_servo_angles[2] + D2R(25)
+                };
+                const float32_t alpha = 0.8f;
+                current_leg_state->actual_joint_angles[0] = compensated_angles[0] * (1 - alpha) + alpha * current_leg_state->next_joint_angles[0];
+                current_leg_state->actual_joint_angles[1] = compensated_angles[1] * (1 - alpha) + alpha * current_leg_state->next_joint_angles[1];
+                current_leg_state->actual_joint_angles[2] = compensated_angles[2] * (1 - alpha) + alpha * current_leg_state->next_joint_angles[2];
+            }
         }
 
         if (motion_state == SYNCING) {
@@ -1362,10 +1404,27 @@ void StartDefaultTask(void *argument) {
             leg_servo_angles[1] = -current_leg_state->next_joint_angles[1];
             leg_servo_angles[2] = current_leg_state->next_joint_angles[2] - D2R(25);
 
+            uint8_t limit_alert = 0;
+            for (int axis = 0; axis < 3; axis++) {
+                if (leg_servo_angles[axis] < current_leg->limits[axis][0] || leg_servo_angles[axis] > current_leg->limits[axis][1]) {
+                    LOG_ERROR("Limit alert triggered, leg %d, axis %d", i, axis);
+                    LOG_ERROR("Calculated value %5.2f, limits %5.2f, %5.2f", leg_servo_angles[axis], current_leg->limits[axis][0], current_leg->limits[axis][1]);
+                    limit_alert = 1;
+                }
+            }
+
+            // if (limit_alert && motion_state == WALKING) {
+            //     velocity = 0.0f;
+            //     next_state = POWERDOWN;
+            //     continue;
+            // }
+
             write_next_servo_position(leg_servos, 3, leg_servo_angles);
         }
 
-        HAL_GPIO_TogglePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin);
+        HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_SET);
 
         // Schedule at fixed 1 Hz
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(MAIN_LOOP_INTERVAL));
