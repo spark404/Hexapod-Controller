@@ -702,10 +702,23 @@ void StartSpiSlaveTask(void *argument) {
         switch (buffer[2]) {
             case 0x01:
                 // Command set speed
-                const uint32_t new_velocity = (buffer[5] << 8) | buffer[6];
-                velocity = (float32_t) new_velocity;
+                const uint32_t *new_velocity = (uint32_t *)&buffer[3];
+                if (*new_velocity > 100) {
+                    LOG_WARN("[StartSpiSlaveTask] Ignoring new velocity %ld", *new_velocity);
+                    break;
+                }
                 LOG_INFO("[StartSpiSlaveTask] Set speed to %5.2f mm/s", velocity);
+                velocity = (float32_t)*new_velocity;
                 break;
+            case 0x02:
+                // Command set heading
+                const float32_t *new_heading = (float32_t *)&buffer[3];
+                if (*new_heading < 0 || *new_heading > 360) {
+                    LOG_WARN("[StartSpiSlaveTask] Ignoring new heading %5.2f", *new_heading);
+                    break;
+                }
+                LOG_INFO("[StartSpiSlaveTask] Set heading to %5.2f mm/s", heading);
+                heading = *new_heading;
             default:
                 LOG_WARN("[StartSpiSlaveTask] Unknown command: 0x%02x", buffer[2]);
                 break;
@@ -958,7 +971,6 @@ void StartDefaultTask(void *argument) {
     bmi088.intf_ptr_gyro = &bmi088_gyr_intf;
 
     float32_t prev_remaining[6] = {0, 0, 0};
-
 
     int8_t bmi088_res = bmi08g_init(&bmi088);
     if (bmi088_res != 0) {
@@ -1299,6 +1311,7 @@ void StartDefaultTask(void *argument) {
             arm_mat_mult_f32(&Thexapod, &Tbody, &Thexapod_body);
 
             float32_t longest_path = 0.f;
+            float32_t longest_lifted_path = 0.f;
             float32_t remaining_path_length = 0.f;
             float32_t paths[6][4][3];
             for (int i = 0; i < 6; i++) {
@@ -1334,8 +1347,14 @@ void StartDefaultTask(void *argument) {
                     float32_t p_target_in_body_frame[3] = {point[0], point[1], robot_state.body.translation[2] * -1};
 
                     calculate_path(p_current_in_body_frame, p_target_in_body_frame, 25, 2.0f, paths[i]);
+                    float32_t path_length = arm_euclidean_distance_f32(p_current_in_body_frame, p_target_in_body_frame,
+                                                                       3);
+                    longest_lifted_path = fmaxf(path_length, longest_lifted_path);
+
                 }
             }
+
+            longest_path = fminf(longest_path, longest_lifted_path);
 
             for (int i = 0; i < 6; i++) {
                 struct leg_state *current_leg_state = &robot_state.leg_state[i];
