@@ -1,0 +1,26 @@
+//
+// Created by Hugo Trippaers on 30/12/2025.
+//
+
+#ifndef CONTROLLER_H
+#define CONTROLLER_H
+
+#include "controller_types.h"
+
+void controller_init(controller_ctx_t *ctx);
+
+void controller_set_state_callback(
+    controller_ctx_t *ctx,
+    controller_state_cb_t cb,
+    void *user_data
+);
+
+void controller_update(
+    controller_ctx_t *ctx,
+    const controller_command_t *cmd,
+    float32_t dt_s
+);
+
+const char *controller_state_to_string(controller_state_t state);
+
+#endif //CONTROLLER_H

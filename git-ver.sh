@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+
+description=$(git describe --long --abbrev=10 --match 'v*')
+re='^v([0-9]+)\.([0-9]+)\.([0-9]+)-([0-9]+)-g([0-9a-f]+)$'
+
+if [[ $description =~ $re ]]; then
+    ver_major="${BASH_REMATCH[1]}"
+    ver_minor="${BASH_REMATCH[2]}"
+    ver_patch="${BASH_REMATCH[3]}"
+    commits="${BASH_REMATCH[4]}"
+    sha="${BASH_REMATCH[5]}"
+else
+    echo "Error: '${description}' didn't match regex"
+    exit 1
+fi
+# refresh the index
+git status >/dev/null 2>&1
+
+# are there local/staged changes?
+dirty=$(git diff-index --quiet HEAD || echo ".dirty")
+
+# is the current commit pushed to a remote branch?
+remote_branch=$(git branch -r --contains HEAD 2>/dev/null)
+if [ "$remote_branch" == "" ]; then
+    dirty=".dirty"
+fi
+
+echo "${ver_major}.${ver_minor}.${ver_patch}+${commits}.${sha}${dirty}"
