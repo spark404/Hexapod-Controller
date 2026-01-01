@@ -1172,7 +1172,7 @@ void StartDefaultTask(void *argument)
 /* USER CODE END Header_StartSpiSlaveTask */
 void StartSpiSlaveTask(void *argument)
 {
-    /* USER CODE BEGIN StartSpiSlaveTask */
+  /* USER CODE BEGIN StartSpiSlaveTask */
     // Message format (7 bytes)
     //   uint8_t magic
     //   uint8_t reserved
@@ -1254,7 +1254,7 @@ void StartSpiSlaveTask(void *argument)
                 break;
         }
     }
-    /* USER CODE END StartSpiSlaveTask */
+  /* USER CODE END StartSpiSlaveTask */
 }
 
 /**
