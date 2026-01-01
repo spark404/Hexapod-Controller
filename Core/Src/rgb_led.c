@@ -1,3 +1,9 @@
+/*
+ * SPDX-FileCopyrightText: 2025 Hugo Trippaers <hugo@trippaers.nl>
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "rgb_led.h"
 #include "stm32f4xx_hal.h"   // For GPIO / HAL functions
 

@@ -1,0 +1,30 @@
+version = 1
+
+[[annotations]]
+path = "Drivers/BMI08X/**"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "Drivers/BMM350/**"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "Drivers/BNO055/**"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "Drivers/CMSIS/**"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = "Drivers/STM32F4xx_HAL_Driver/**"
+SPDX-License-Identifier = "BSD-3-Clause"
+
+[[annotations]]
+path = "Middlewares/Third_Party/FreeRTOS/**"
+SPDX-License-Identifier = "Apache-2.0"
+
+[[annotations]]
+path = ".**"
+SPDX-License-Identifier = "Apache-2.0"
+SPDX-FileCopyrightText = "2025 Hugo Trippaers <hugo@trippaers.nl>"

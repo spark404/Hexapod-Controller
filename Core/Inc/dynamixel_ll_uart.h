@@ -1,3 +1,9 @@
+/*
+ * SPDX-FileCopyrightText: 2025 2025 Hugo Trippaers <hugo@trippaers.nl>
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef DYNAMIXEL_LL_UART_H
 #define DYNAMIXEL_LL_UART_H
 

@@ -1,58 +1,37 @@
-#THIS FILE IS AUTO GENERATED FROM THE TEMPLATE! DO NOT CHANGE!
-set(CMAKE_SYSTEM_NAME Generic)
-set(CMAKE_SYSTEM_VERSION 1)
-cmake_minimum_required(VERSION 3.31)
-
-# specify cross-compilers and tools
-set(CMAKE_C_COMPILER arm-none-eabi-gcc)
-set(CMAKE_CXX_COMPILER arm-none-eabi-g++)
-set(CMAKE_ASM_COMPILER  arm-none-eabi-gcc)
-set(CMAKE_AR arm-none-eabi-ar)
-set(CMAKE_OBJCOPY arm-none-eabi-objcopy)
-set(CMAKE_OBJDUMP arm-none-eabi-objdump)
-set(SIZE arm-none-eabi-size)
-set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
-
-set(CMAKE_MESSAGE_LOG_LEVEL DEBUG)
-
-# project settings
-project(Hexapod C CXX ASM)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_C_STANDARD 11)
+cmake_minimum_required(VERSION 3.22)
 
 include(FetchContent)
 
-#Uncomment for hardware floating point
-add_compile_definitions(ARM_MATH_CM4;ARM_MATH_MATRIX_CHECK;ARM_MATH_ROUNDING)
-add_compile_options(-mfloat-abi=hard -mfpu=fpv4-sp-d16)
-add_link_options(-mfloat-abi=hard -mfpu=fpv4-sp-d16)
+# Testing FetchContent
+# set(CMAKE_MESSAGE_LOG_LEVEL DEBUG)
 
-#Uncomment for software floating point
-#add_compile_options(-mfloat-abi=soft)
+# Setup compiler settings
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS ON)
 
-add_compile_options(-mcpu=cortex-m4 -mthumb -mthumb-interwork)
-add_compile_options(-ffunction-sections -fdata-sections -fno-common -fmessage-length=0)
+# Define the build type
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Debug")
+endif()
 
-# uncomment to mitigate c++17 absolute addresses warnings
-#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-register")
+# Set the project name
+set(CMAKE_PROJECT_NAME Hexapod)
 
-# Enable assembler files preprocessing
-add_compile_options($<$<COMPILE_LANGUAGE:ASM>:-x$<SEMICOLON>assembler-with-cpp>)
+# Enable compile command to ease indexing with e.g. clangd
+set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
-if ("${CMAKE_BUILD_TYPE}" STREQUAL "Release")
-    message(STATUS "Maximum optimization for speed")
-    add_compile_options(-Ofast)
-elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "RelWithDebInfo")
-    message(STATUS "Maximum optimization for speed, debug info included")
-    add_compile_options(-Ofast -g)
-elseif ("${CMAKE_BUILD_TYPE}" STREQUAL "MinSizeRel")
-    message(STATUS "Maximum optimization for size")
-    add_compile_options(-Os)
-else ()
-    message(STATUS "Minimal optimization, debug info included")
-    add_compile_options(-Og -g)
-endif ()
+# Core project settings
+project(${CMAKE_PROJECT_NAME})
+message("Build type: " ${CMAKE_BUILD_TYPE})
 
+# Enable CMake support for ASM and C languages
+enable_language(C ASM)
+
+# Create an executable object type
+add_executable(${CMAKE_PROJECT_NAME})
+
+# Include external projects
 set(CMSISCORE ${CMAKE_SOURCE_DIR}/Drivers/CMSIS)
 FetchContent_Declare(
         cmsis-dsp
@@ -79,28 +58,69 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(dynamixel)
 
-include_directories(Core/Inc Drivers/STM32F4xx_HAL_Driver/Inc Drivers/STM32F4xx_HAL_Driver/Inc/Legacy Drivers/CMSIS/Device/ST/STM32F4xx/Include Drivers/CMSIS/Include Drivers/CMSIS_DSP/Include Drivers/BMM350/Inc Drivers/BMI08X/Inc Drivers/BNO055/Inc Drivers/Dynamixel/Inc Drivers/Dynamixel/PrivateInc Middlewares/Third_Party/FreeRTOS/Source/include Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS_V2 Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F Middlewares/HexapodMath/Inc)
+# Add STM32CubeMX generated sources
+add_subdirectory(cmake/stm32cubemx)
 
-add_definitions(-DDEBUG -DUSE_HAL_DRIVER -DSTM32F401xE)
+# Link directories setup
+target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
+        # Add user defined library search paths
+)
 
-file(GLOB_RECURSE SOURCES "Core/*.*" "Middlewares/*.*" "Drivers/*.*")
+# Add sources to executable
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+        # Add user sources here
+        Core/Src/calculator.c
+        Core/Src/dynamixel_ll_uart.c
+        Core/Src/servos.c
+        Core/Src/rgb_led.c
+        Core/Src/controller.c
+        Drivers/BMI08X/Src/bmi08a.c
+        Drivers/BMI08X/Src/bmi08g.c
+        Drivers/BMI08X/Src/bmi08xa.c
+        Drivers/BMI08X/Src/bmi088_anymotiona.c
+        Drivers/BMI08X/Src/bmi088_mma.c
+        Drivers/BMM350/Src/bmm350.c
+        Drivers/BMM350/Src/bmm350_oor.c
+        Drivers/BNO055/Src/bno055.c
+)
 
-set(LINKER_SCRIPT ${CMAKE_SOURCE_DIR}/STM32F401RETx_FLASH.ld)
+# Add include paths
+target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+        # Add user defined include paths
+        Drivers/CMSIS_DSP/Include
+        Drivers/BMM350/Inc
+        Drivers/BMI08X/Inc
+        Drivers/BNO055/Inc
+        Drivers/Dynamixel/Inc
+        Middlewares/HexapodMath/Inc
+)
 
-add_link_options(-Wl,-gc-sections,--print-memory-usage,-Map=${PROJECT_BINARY_DIR}/${PROJECT_NAME}.map)
-add_link_options(-mcpu=cortex-m4 -mthumb -mthumb-interwork)
-add_link_options(-T ${LINKER_SCRIPT})
+# Add project symbols (macros)
+target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
+        # Add user defined symbols
+)
 
-add_executable(${PROJECT_NAME}.elf ${SOURCES} ${LINKER_SCRIPT})
+# Remove wrong libob.a library dependency when using cpp files
+list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 
-add_dependencies(${PROJECT_NAME}.elf dynamixel HexapodMath CMSISDSP)
-target_link_libraries(${PROJECT_NAME}.elf dynamixel HexapodMath CMSISDSP)
+# Add linked libraries
+target_link_libraries(${CMAKE_PROJECT_NAME}
+        stm32cubemx
 
-set(HEX_FILE ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.hex)
-set(BIN_FILE ${PROJECT_BINARY_DIR}/${PROJECT_NAME}.bin)
+        # Add user defined libraries
+        dynamixel
+        HexapodMath
+        CMSISDSP
 
-add_custom_command(TARGET ${PROJECT_NAME}.elf POST_BUILD
-        COMMAND ${CMAKE_OBJCOPY} -Oihex $<TARGET_FILE:${PROJECT_NAME}.elf> ${HEX_FILE}
-        COMMAND ${CMAKE_OBJCOPY} -Obinary $<TARGET_FILE:${PROJECT_NAME}.elf> ${BIN_FILE}
-        COMMENT "Building ${HEX_FILE}
-Building ${BIN_FILE}")
+        # We need libm(ath) for some trig functions
+        m
+)
+
+set(HEX_FILE ${PROJECT_BINARY_DIR}/${CMAKE_PROJECT_NAME}.hex)
+set(BIN_FILE ${PROJECT_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin)
+
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_OBJCOPY} -Oihex $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${HEX_FILE}
+        COMMAND ${CMAKE_OBJCOPY} -Obinary $<TARGET_FILE:${CMAKE_PROJECT_NAME}> ${BIN_FILE}
+        COMMENT "Building ${HEX_FILE} Building ${BIN_FILE}"
+)

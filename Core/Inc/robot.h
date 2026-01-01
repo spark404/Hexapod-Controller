@@ -1,8 +1,8 @@
-//
-// Created by Hugo Trippaers on 20/07/2025.
-//
-// Definitions for the robot
-//
+/*
+ * SPDX-FileCopyrightText: 2025 Hugo Trippaers <hugo@trippaers.nl>
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #ifndef ROBOT_H
 #define ROBOT_H

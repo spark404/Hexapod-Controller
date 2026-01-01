@@ -1,6 +1,9 @@
-//
-// Created by Hugo Trippaers on 31/12/2025.
-//
+/*
+ * SPDX-FileCopyrightText: 2025 Hugo Trippaers <hugo@trippaers.nl>
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #ifndef RGB_LED_H
 #define RGB_LED_H
 

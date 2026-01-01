@@ -1,6 +1,8 @@
-//
-// Created by Hugo Trippaers on 30/12/2025.
-//
+/*
+ * SPDX-FileCopyrightText: 2025 Hugo Trippaers <hugo@trippaers.nl>
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
 
 #include "controller.h"
 

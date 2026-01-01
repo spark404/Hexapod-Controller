@@ -686,7 +686,7 @@ void StartSpiSlaveTask(void *argument) {
         }
 
         if (flags & (1U << 31)) {
-            LOG_DEBUG("[StartSpiSlaveTask] osThreadFlagsWait error %d", flags);
+            LOG_DEBUG("[StartSpiSlaveTask] osThreadFlagsWait error %ld", flags);
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }

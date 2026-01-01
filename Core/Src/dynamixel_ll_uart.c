@@ -1,3 +1,9 @@
+/*
+ * SPDX-FileCopyrightText: 2025 Hugo Trippaers <hugo@trippaers.nl>
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 #include "dynamixel_ll_uart.h"
 
 #include "log.h"
@@ -33,7 +39,7 @@ ssize_t dynamixel_write_uart_dma(const uint8_t *txBuffer, const size_t size, voi
 
 	if (flags & (1U << 31)) {
 		HAL_UART_DMAStop(huart);
-		LOG_DEBUG("dynamixel_write_uart_dma: osThreadFlagsWait error %d", flags);
+		LOG_DEBUG("dynamixel_write_uart_dma: osThreadFlagsWait error %ld", flags);
 		return -1;
 	}
 
@@ -74,7 +80,7 @@ ssize_t dynamixel_read_uart_dma(uint8_t *rxBuffer, const size_t size, void *pvCo
 
 	if (flags & (1U << 31)) {
 		HAL_UART_DMAStop(huart);
-		LOG_DEBUG("dynamixel_read_uart_dma: osThreadFlagsWait error %d", flags);
+		LOG_DEBUG("dynamixel_read_uart_dma: osThreadFlagsWait error %ld", flags);
 		return -1;
 	}
 
