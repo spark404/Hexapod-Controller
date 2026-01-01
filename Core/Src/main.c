@@ -905,6 +905,7 @@ static void stm32_state_change_cb(
 ) {
     (void)ctx;
     (void)user_data;
+    (void)from;
 
     switch (to) {
         case CTRL_SYNCING:
@@ -1172,6 +1173,8 @@ void StartDefaultTask(void *argument)
 /* USER CODE END Header_StartSpiSlaveTask */
 void StartSpiSlaveTask(void *argument)
 {
+    (void)argument;
+
   /* USER CODE BEGIN StartSpiSlaveTask */
     // Message format (7 bytes)
     //   uint8_t magic
@@ -1219,7 +1222,7 @@ void StartSpiSlaveTask(void *argument)
 
         // Received the data
         switch (buffer[2]) {
-            case 0x01:
+            case 0x01: {
                 // Command set speed
                 const float32_t *new_velocity = (float32_t *) &buffer[3];
                 if (*new_velocity < 0 || *new_velocity > 100) {
@@ -1229,7 +1232,9 @@ void StartSpiSlaveTask(void *argument)
                 LOG_INFO("[StartSpiSlaveTask] Set speed to %5.2f mm/s", *new_velocity);
                 updated_velocity = *new_velocity;
                 break;
-            case 0x02:
+            }
+
+            case 0x02: {
                 // Command set heading
                 const float32_t *new_heading = (float32_t *) &buffer[3];
                 if (*new_heading < 0 || *new_heading > M_PI) {
@@ -1239,7 +1244,9 @@ void StartSpiSlaveTask(void *argument)
                 LOG_INFO("[StartSpiSlaveTask] Set heading to %5.3f rad", *new_heading);
                 updated_heading = *new_heading;
                 break;
-            case 0x03:
+            }
+
+            case 0x03: {
                 // Command set height
                 const float32_t *new_height = (float32_t *) &buffer[3];
                 if (*new_height < 50 || *new_height > 170) {
@@ -1249,6 +1256,8 @@ void StartSpiSlaveTask(void *argument)
                 LOG_INFO("[StartSpiSlaveTask] Set new body height to %5.2f mm", *new_height);
                 updated_height = *new_height;
                 break;
+            }
+
             default:
                 LOG_WARN("[StartSpiSlaveTask] Unknown command: 0x%02x", buffer[2]);
                 break;
