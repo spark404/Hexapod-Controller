@@ -37,6 +37,8 @@ typedef void (*controller_state_cb_t)(
 );
 
 typedef struct controller_ctx {
+    const struct robot *cfg;
+
     controller_state_t state;
     controller_state_t next_state;
 

@@ -21,8 +21,9 @@
 #include "log.h"
 
 void controller_init(controller_ctx_t *ctx) {
+    ctx->cfg = &r;
     ctx->state = CTRL_BOOT;
-    ctx->next_state = CTRL_SYNCING;
+    ctx->next_state = CTRL_BOOT;
     ctx->powerdown_timeout = CTRL_POWERDOWN_TIMEOUT;
 
     // Do a bunch of static calculations that depend on the robot configuration in robot.h
@@ -40,7 +41,7 @@ void controller_init(controller_ctx_t *ctx) {
 
     for (int i = 0; i < 6; i++) {
         float32_t mount_point_xy[2];
-        const struct leg *current_leg = &r.leg[i];
+        const struct leg *current_leg = &ctx->cfg->leg[i];
         struct leg_state *current_leg_state = &ctx->robot.leg_state[i];
 
         arm_mat_init_f32(&current_leg_state->coxa_mat, 4, 4, current_leg_state->coxa_mat_data);
@@ -106,6 +107,10 @@ void controller_update(controller_ctx_t *ctx, const controller_command_t *cmd, f
     bool wants_rotation = fabsf(ctx->yaw_error) > CTRL_EPS_ANG;
 
     // Rules for transitions
+    if (ctx->state == CTRL_BOOT) {
+        ctx->next_state = CTRL_SYNCING;
+    }
+
     if (ctx->state == CTRL_STANDING) {
         if (ctx->powerdown_timeout <= 0.0f) {
             ctx->next_state = CTRL_POWERDOWN;
@@ -301,6 +306,13 @@ void controller_update(controller_ctx_t *ctx, const controller_command_t *cmd, f
                 r_perp[1] * rotation_step
             };
 
+            float32_t max_rot_disp = CTRL_MAX_ROT_FOOT_MM;
+            float32_t rot_mag = hypotf(rot_disp[0], rot_disp[1]);
+            if (rot_mag > max_rot_disp) {
+                rot_disp[0] *= max_rot_disp / rot_mag;
+                rot_disp[1] *= max_rot_disp / rot_mag;
+            }
+
             if (current_leg_state->grounded) {
                 float32_t arc_disp[2] = {
                     -movement_vector[0] + rot_disp[0],
@@ -366,6 +378,10 @@ void controller_update(controller_ctx_t *ctx, const controller_command_t *cmd, f
                     movement_velocity + rotational_velocity;
 
             effective_velocity = fmaxf(effective_velocity, 1e-3f);
+
+            if (longest_path < CTRL_CLOSE_THRESH) {
+                continue;
+            }
 
             float32_t substeps = longest_path / effective_velocity;
             substeps = fmaxf(substeps, 1.0f);

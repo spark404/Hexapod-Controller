@@ -19,5 +19,6 @@
 #define CTRL_LIFT_VEL      20.0f
 #define CTRL_LIFT_Z        50.0f
 #define CTRL_BODY_Z        100.0f // mm
+#define CTRL_MAX_ROT_FOOT_MM 6.0f // CTRL_MAX_ROT_FOOT_MM <= CTRL_LEG_RADIUS_MM / 2
 
 #endif //CONTROLLER_CONFIG_H

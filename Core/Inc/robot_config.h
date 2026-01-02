@@ -8,6 +8,7 @@
 #define ROBOT_CONFIG_H
 
 #include "robot.h"
+#include "hexapodmath/additional_functions.h"
 
 static const struct robot r = {
     .step_size = 80, // mm

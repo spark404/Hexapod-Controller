@@ -9,7 +9,6 @@
 
 #include "arm_math.h"
 #include "hexapodmath/pose.h"
-#include "hexapodmath/additional_functions.h"
 
 struct leg {
     /// Mount point of the leg to the body in polar coordinates

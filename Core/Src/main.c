@@ -41,7 +41,6 @@
 
 
 #include "robot.h"
-#include "robot_config.h"
 #include "calculator.h"
 #include "servos.h"
 #include "log.h"
@@ -1081,7 +1080,7 @@ void StartDefaultTask(void *argument)
         // Determine the actual servo positions
         for (int i = 0; i < 6; i++) {
             struct leg_state *current_leg_state = &controller_ctx.robot.leg_state[i];
-            const struct leg *current_leg = &r.leg[i];
+            const struct leg *current_leg = &controller_ctx.cfg->leg[i];
 
             dynamixel_servo_t leg_servos[3] = {
                 dynamixel_servo[current_leg->servos[0] - 1],
@@ -1124,38 +1123,40 @@ void StartDefaultTask(void *argument)
         controller_update(&controller_ctx, &cmd, MAIN_LOOP_INTERVAL / 1000);
 
         // Write next values to the servos
-        for (int i = 0; i < 6; i++) {
-            struct leg_state *current_leg_state = &controller_ctx.robot.leg_state[i];
-            const struct leg *current_leg = &r.leg[i];
+        if (controller_ctx.state != CTRL_POWERDOWN) {
+            for (int i = 0; i < 6; i++) {
+                struct leg_state *current_leg_state = &controller_ctx.robot.leg_state[i];
+                const struct leg *current_leg = &controller_ctx.cfg->leg[i];
 
-            dynamixel_servo_t leg_servos[3] = {
-                dynamixel_servo[current_leg->servos[0] - 1],
-                dynamixel_servo[current_leg->servos[1] - 1],
-                dynamixel_servo[current_leg->servos[2] - 1],
-            };
-            float32_t leg_servo_angles[3];
+                dynamixel_servo_t leg_servos[3] = {
+                    dynamixel_servo[current_leg->servos[0] - 1],
+                    dynamixel_servo[current_leg->servos[1] - 1],
+                    dynamixel_servo[current_leg->servos[2] - 1],
+                };
+                float32_t leg_servo_angles[3];
 
-            // Compensate angles for geometry
-            leg_servo_angles[0] = current_leg_state->next_joint_angles[0];
-            leg_servo_angles[1] = -current_leg_state->next_joint_angles[1];
-            leg_servo_angles[2] = current_leg_state->next_joint_angles[2] - D2R(25);
+                // Compensate angles for geometry
+                leg_servo_angles[0] = current_leg_state->next_joint_angles[0];
+                leg_servo_angles[1] = -current_leg_state->next_joint_angles[1];
+                leg_servo_angles[2] = current_leg_state->next_joint_angles[2] - D2R(25);
 
-            uint8_t limit_alert = 0;
-            for (int axis = 0; axis < 3; axis++) {
-                if (leg_servo_angles[axis] < current_leg->limits[axis][0] || leg_servo_angles[axis] > current_leg->limits[axis][1]) {
-                    LOG_ERROR("Limit alert triggered, leg %d, axis %d", i, axis);
-                    LOG_ERROR("Calculated value %5.2f, limits %5.2f, %5.2f", leg_servo_angles[axis], current_leg->limits[axis][0], current_leg->limits[axis][1]);
-                    limit_alert = 1;
+                uint8_t limit_alert = 0;
+                for (int axis = 0; axis < 3; axis++) {
+                    if (leg_servo_angles[axis] < current_leg->limits[axis][0] || leg_servo_angles[axis] > current_leg->limits[axis][1]) {
+                        LOG_ERROR("Limit alert triggered, leg %d, axis %d", i, axis);
+                        LOG_ERROR("Calculated value %5.2f, limits %5.2f, %5.2f", leg_servo_angles[axis], current_leg->limits[axis][0], current_leg->limits[axis][1]);
+                        limit_alert = 1;
+                    }
                 }
-            }
 
-            if (limit_alert && controller_ctx.state == CTRL_WALKING) {
-                cmd.velocity = 0.0f;
-                controller_ctx.next_state = CTRL_POWERDOWN;
-                continue;
-            }
+                if (limit_alert && controller_ctx.state == CTRL_WALKING) {
+                    cmd.velocity = 0.0f;
+                    controller_ctx.next_state = CTRL_POWERDOWN;
+                    continue;
+                }
 
-            write_next_servo_position(leg_servos, 3, leg_servo_angles);
+                write_next_servo_position(leg_servos, 3, leg_servo_angles);
+            }
         }
 
         // Schedule at fixed 1 Hz
