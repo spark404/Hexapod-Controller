@@ -9,6 +9,10 @@
 
 #include "controller_types.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void controller_init(controller_ctx_t *ctx);
 
 void controller_set_state_callback(
@@ -19,10 +23,15 @@ void controller_set_state_callback(
 
 void controller_update(
     controller_ctx_t *ctx,
+    const controller_attitude_t *attitude,
     const controller_command_t *cmd,
     float32_t dt_s
 );
 
 const char *controller_state_to_string(controller_state_t state);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif //CONTROLLER_H

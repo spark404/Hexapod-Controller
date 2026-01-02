@@ -1068,6 +1068,12 @@ void StartDefaultTask(void *argument)
         .heading = 0,
         .height = 100,
     };
+    controller_attitude_t attitude = {
+        .roll = 0.0f,
+        .pitch = 0.0f,
+        .yaw = 0.0f,
+    };
+
     controller_init(&controller_ctx);
     controller_set_state_callback(&controller_ctx, stm32_state_change_cb, NULL);
 
@@ -1120,7 +1126,7 @@ void StartDefaultTask(void *argument)
             }
         }
 
-        controller_update(&controller_ctx, &cmd, MAIN_LOOP_INTERVAL / 1000);
+        controller_update(&controller_ctx, &attitude, &cmd, MAIN_LOOP_INTERVAL / 1000);
 
         // Write next values to the servos
         if (controller_ctx.state != CTRL_POWERDOWN) {
