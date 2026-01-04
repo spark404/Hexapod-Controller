@@ -29,6 +29,8 @@
 #include "stm32f4xx_hal_i2c.h"
 
 #include "arm_math.h"
+#include "attitude_ekf.h"
+#include "attitude_measurement.h"
 
 #include "bmm350.h"
 #include "bmi08x.h"
@@ -47,7 +49,10 @@
 #include "semphr.h"
 #include "dynamixel/protocol.h"
 #include "controller.h"
+#include "event_groups.h"
 #include "rgb_led.h"
+#include "measure.h"
+#include "sensors.h"
 
 /* USER CODE END Includes */
 
@@ -67,6 +72,12 @@ typedef struct {
     GPIO_TypeDef *CS_Port;
     uint16_t CS_Pin;
 } spi_intf_ptr;
+
+typedef struct {
+    float roll, pitch, yaw;
+    float gyro_bias[3];
+    TickType_t last_update_ts;
+} ekf_output_t;
 
 /* USER CODE END PTD */
 
@@ -108,6 +119,7 @@ SPI_HandleTypeDef hspi2;
 TIM_HandleTypeDef htim1;
 
 UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart6;
 DMA_HandleTypeDef hdma_usart6_tx;
 DMA_HandleTypeDef hdma_usart6_rx;
@@ -123,8 +135,51 @@ const osThreadAttr_t defaultTask_attributes = {
 osThreadId_t spiSlaveTaskHandle;
 const osThreadAttr_t spiSlaveTask_attributes = {
   .name = "spiSlaveTask",
-  .stack_size = 128 * 4,
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for gyroTask */
+osThreadId_t gyroTaskHandle;
+const osThreadAttr_t gyroTask_attributes = {
+  .name = "gyroTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityHigh,
+};
+/* Definitions for accelTask */
+osThreadId_t accelTaskHandle;
+const osThreadAttr_t accelTask_attributes = {
+  .name = "accelTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
+/* Definitions for magTask */
+osThreadId_t magTaskHandle;
+const osThreadAttr_t magTask_attributes = {
+  .name = "magTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal,
+};
+/* Definitions for ekfTask */
+osThreadId_t ekfTaskHandle;
+const osThreadAttr_t ekfTask_attributes = {
+  .name = "ekfTask",
+  .stack_size = 2048 * 4,
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
+/* Definitions for ekf_queue */
+osMessageQueueId_t ekf_queueHandle;
+const osMessageQueueAttr_t ekf_queue_attributes = {
+  .name = "ekf_queue"
+};
+/* Definitions for spiMutex */
+osMutexId_t spiMutexHandle;
+const osMutexAttr_t spiMutex_attributes = {
+  .name = "spiMutex"
+};
+/* Definitions for systemEvents */
+osEventFlagsId_t systemEventsHandle;
+const osEventFlagsAttr_t systemEvents_attributes = {
+  .name = "systemEvents"
 };
 /* USER CODE BEGIN PV */
 i2c_intf_ptr bmm350_intf;
@@ -152,7 +207,10 @@ float32_t updated_velocity = 0.f;
 float32_t updated_heading = 0.f;
 float32_t updated_height = 100.f;
 
-uint8_t led_state[3] = {1, 0, 0};
+ekf_output_t ekf_out;
+
+uint8_t gyro_interrupt_enable = 0;
+uint8_t accel_interrupt_enable = 0;
 
 /* USER CODE END PV */
 
@@ -168,12 +226,15 @@ static void MX_SPI2_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART6_UART_Init(void);
 static void MX_TIM1_Init(void);
+static void MX_USART2_UART_Init(void);
 void StartDefaultTask(void *argument);
 void StartSpiSlaveTask(void *argument);
+void StartGyroTask(void *argument);
+void StartAccelTask(void *argument);
+void StartMagTask(void *argument);
+void StartEkfTask(void *argument);
 
 /* USER CODE BEGIN PFP */
-void StartSpiSlaveTask(void *argument);
-
 int __io_putchar(int ch);
 
 BMM350_INTF_RET_TYPE stm32_bmm350_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, void *intf_ptr);
@@ -194,6 +255,10 @@ int8_t stm32_bno055_bus_read(uint8_t dev_addr, uint8_t reg_addr, uint8_t *reg_da
 
 void stm32_bno055_delay_us(u32 period);
 
+void PERIF_BMI088_Init();
+void PERIF_BMM350_Init();
+void PERIF_BNO055_Init();
+void PERIF_Dynamixel_Init();
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -240,14 +305,36 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART6_UART_Init();
   MX_TIM1_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
     HAL_TIM_Base_Start(&htim1);
+
+    LOG_INFO("[Main] Hexapod Control Firmware");
+    LOG_INFO("[Main] Build: %s %s", __DATE__, __TIME__);
+
+    LOG_INFO("[Main] Starting peripheral init");
+    HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_RESET);
+
+    PERIF_BMI088_Init();
+    PERIF_BMM350_Init();
+    // PERIF_BNO055_Init();
+
+    LOG_INFO("[Main] Peripheral init complete");
+    HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_SET);
+
 
   /* USER CODE END 2 */
 
   /* Init scheduler */
   osKernelInitialize();
+  /* Create the mutex(es) */
+  /* creation of spiMutex */
+  spiMutexHandle = osMutexNew(&spiMutex_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
     /* add mutexes, ... */
@@ -260,6 +347,10 @@ int main(void)
     /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
 
+  /* Create the queue(s) */
+  /* creation of ekf_queue */
+  ekf_queueHandle = osMessageQueueNew (32, sizeof(sensor_sample_t), &ekf_queue_attributes);
+
   /* USER CODE BEGIN RTOS_QUEUES */
     /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
@@ -271,9 +362,24 @@ int main(void)
   /* creation of spiSlaveTask */
   spiSlaveTaskHandle = osThreadNew(StartSpiSlaveTask, NULL, &spiSlaveTask_attributes);
 
+  /* creation of gyroTask */
+  gyroTaskHandle = osThreadNew(StartGyroTask, NULL, &gyroTask_attributes);
+
+  /* creation of accelTask */
+  accelTaskHandle = osThreadNew(StartAccelTask, NULL, &accelTask_attributes);
+
+  /* creation of magTask */
+  magTaskHandle = osThreadNew(StartMagTask, NULL, &magTask_attributes);
+
+  /* creation of ekfTask */
+  ekfTaskHandle = osThreadNew(StartEkfTask, NULL, &ekfTask_attributes);
+
   /* USER CODE BEGIN RTOS_THREADS */
     rgb_led_init();
   /* USER CODE END RTOS_THREADS */
+
+  /* creation of systemEvents */
+  systemEventsHandle = osEventFlagsNew(&systemEvents_attributes);
 
   /* USER CODE BEGIN RTOS_EVENTS */
     /* add events, ... */
@@ -592,6 +698,39 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
   * @brief USART6 Initialization Function
   * @param None
   * @retval None
@@ -686,16 +825,24 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI0_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+
+  HAL_NVIC_SetPriority(EXTI1_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(EXTI1_IRQn);
+
   /* USER CODE BEGIN MX_GPIO_Init_2 */
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+#define DEBUG_USART USART1
 int __io_putchar(int ch) {
-    while (!LL_USART_IsActiveFlag_TXE(USART1)) {
+    while (!LL_USART_IsActiveFlag_TXE(DEBUG_USART)) {
     }
 
-    LL_USART_TransmitData8(USART1, ch);
+    LL_USART_TransmitData8(DEBUG_USART, ch);
 
     return ch;
 }
@@ -896,6 +1043,33 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi) {
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+    UNUSED(GPIO_Pin);
+
+    switch (GPIO_Pin) {
+        case SPI2_INT_GYR_Pin: {
+            if (!gyro_interrupt_enable) {
+                break;
+            }
+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+            vTaskNotifyGiveFromISR(gyroTaskHandle, &xHigherPriorityTaskWoken);
+            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+            break;
+        }
+        case SPI2_INT_ACC_Pin: {
+            if (!accel_interrupt_enable) {
+                break;
+            }
+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+            vTaskNotifyGiveFromISR(accelTaskHandle, &xHigherPriorityTaskWoken);
+            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 static void stm32_state_change_cb(
     controller_ctx_t *ctx,
     controller_state_t from,
@@ -909,61 +1083,46 @@ static void stm32_state_change_cb(
     switch (to) {
         case CTRL_SYNCING:
             rgb_led_set_color(RGB_LED_COLOR_RED);
-            rgb_led_blink(500, 250);
+            rgb_led_blink(500, 0.5f);
+            LOG_INFO("Activating torque on servos");
             for (int i = 0; i < 3 * 6; i++) {
-                LOG_INFO("Activating servo %d...", i);
                 dynamixel_set_torque_enable(&dynamixel_servo[i], 1);
                 dynamixel_set_led(&dynamixel_servo[i], 1);
             }
             break;
         case CTRL_POWERDOWN:
             rgb_led_set_color(RGB_LED_COLOR_MAGENTA);
-            rgb_led_blink(500, 250);
+            rgb_led_blink(500, 0.5f);
+            LOG_INFO("Deactivating torque on servos");
             for (int i = 0; i < 3 * 6; i++) {
-                LOG_INFO("Deactivating servo %d...", i);
                 dynamixel_set_torque_enable(&dynamixel_servo[i], 0);
                 dynamixel_set_led(&dynamixel_servo[i], 0);
             }
             break;
         case CTRL_STANDUP:
             rgb_led_set_color(RGB_LED_COLOR_CYAN);
-            rgb_led_blink(500, 250);
+            rgb_led_blink(500, 0.5f);
             break;
         case CTRL_STANDING:
             rgb_led_set_color(RGB_LED_COLOR_GREEN);
-            rgb_led_blink(500, 250);
+            rgb_led_blink(500, 0.5f);
             break;
         case CTRL_WALKING:
             rgb_led_set_color(RGB_LED_COLOR_BLUE);
-            rgb_led_blink(500, 250);
+            rgb_led_blink(500, 0.5f);
             break;
         default:
             break;
     }
 }
 
-/* USER CODE END 4 */
-
-/* USER CODE BEGIN Header_StartDefaultTask */
 /**
-  * @brief  Function implementing the defaultTask thread.
-  * @param  argument: Not used
-  * @retval None
-  */
-/* USER CODE END Header_StartDefaultTask */
-void StartDefaultTask(void *argument)
-{
-  /* USER CODE BEGIN 5 */
-    (void) argument;
-
-    LOG_INFO("Hexapod Control Firmware");
-    LOG_INFO("Build: %s %s", __DATE__, __TIME__);
-
-    rgb_led_set_color(RGB_LED_COLOR_YELLOW);
-    rgb_led_on();
-
-    LOG_INFO("Starting device checks");
-
+ * Initialize and configure the BMI088 chip
+ * Deactivate interrupts for now
+ *
+ * On error jump to Error_Handler
+ */
+void PERIF_BMI088_Init() {
     // Set the two chip select lines high
     HAL_GPIO_WritePin(SPI2_CS_ACC_GPIO_Port, SPI2_CS_ACC_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(SPI2_CS_GYR_GPIO_Port, SPI2_CS_GYR_Pin, GPIO_PIN_SET);
@@ -985,22 +1144,93 @@ void StartDefaultTask(void *argument)
     bmi088.intf_ptr_accel = &bmi088_acc_intf;
     bmi088.intf_ptr_gyro = &bmi088_gyr_intf;
 
+    // Gyro config 1000hz
+    bmi088.gyro_cfg.range = BMI08_GYRO_RANGE_500_DPS;
+    bmi088.gyro_cfg.odr = BMI08_GYRO_BW_12_ODR_100_HZ;
+    bmi088.gyro_cfg.bw = BMI08_GYRO_BW_12_ODR_100_HZ;
+    bmi088.gyro_cfg.power = BMI08_GYRO_PM_NORMAL;
+
+    struct bmi08_gyro_int_channel_cfg gyro_int_cfg = {
+        .int_channel = BMI08_INT_CHANNEL_3,
+        .int_type = BMI08_GYRO_INT_DATA_RDY,
+        .int_pin_cfg = {
+            BMI08_INT_ACTIVE_LOW,
+            BMI08_INT_MODE_PUSH_PULL,
+            BMI08_DISABLE
+        }
+    };
+
+    // Accel config 200hz
+    bmi088.accel_cfg.range = BMI088_ACCEL_RANGE_6G;
+    bmi088.accel_cfg.odr = BMI08_ACCEL_ODR_12_5_HZ;
+    bmi088.accel_cfg.bw = BMI08_ACCEL_BW_NORMAL;
+    bmi088.accel_cfg.power = BMI08_ACCEL_PM_ACTIVE;
+
+    struct bmi08_accel_int_channel_cfg accel_int_cfg = {
+        BMI08_INT_CHANNEL_1,
+        BMI08_ACCEL_INT_DATA_RDY,
+        {
+            BMI08_INT_ACTIVE_LOW,
+            BMI08_INT_MODE_PUSH_PULL,
+            BMI08_DISABLE,
+        }
+    };
+
     int8_t bmi088_res = bmi08g_init(&bmi088);
     if (bmi088_res != 0) {
         LOG_ERROR("BMI088 gyro initialization failed: %d", bmi088_res);
-        // Error_Handler();
+        Error_Handler();
     } else {
         LOG_INFO("BMI088 gyro initialization complete!");
+    }
+
+    bmi088_res = bmi08g_set_meas_conf(&bmi088);
+    if (bmi088_res != 0) {
+        LOG_ERROR("BMI088 gyro config failed: %d", bmi088_res);
+        Error_Handler();
+    } else {
+        LOG_INFO("BMI088 gyro config complete!");
+    }
+
+    bmi088_res = bmi08g_set_int_config(&gyro_int_cfg, &bmi088);
+    if (bmi088_res != 0) {
+        LOG_ERROR("BMI088 gyro interrupt config failed: %d", bmi088_res);
+        Error_Handler();
+    } else {
+        LOG_INFO("BMI088 gyro interrupt config complete!");
     }
 
     bmi088_res = bmi08a_init(&bmi088);
     if (bmi088_res != 0) {
         LOG_ERROR("BMI088 acc initialization failed: %d", bmi088_res);
-        // Error_Handler();
+        Error_Handler();
     } else {
         LOG_INFO("BMI088 acc initialization complete!");
     }
 
+    bmi088_res = bmi08a_set_meas_conf(&bmi088);
+    if (bmi088_res != 0) {
+        LOG_ERROR("BMI088 accel config failed: %d", bmi088_res);
+        Error_Handler();
+    } else {
+        LOG_INFO("BMI088 accel config complete!");
+    }
+
+    bmi088_res = bmi08a_set_int_config(&accel_int_cfg, &bmi088);
+    if (bmi088_res != 0) {
+        LOG_ERROR("BMI088 accel interrupt config failed: %d", bmi088_res);
+        Error_Handler();
+    } else {
+        LOG_INFO("BMI088 accel interrupt config complete!");
+    }
+}
+
+/**
+ * Init and configure the BMM350 peripheral
+ *
+ * On error jump to Error_Handler
+ */
+void PERIF_BMM350_Init() {
     /* Setup BMM350 */
     bmm350_intf.address = 0x14;
     bmm350_intf.hi2c = &hi2c2;
@@ -1018,8 +1248,14 @@ void StartDefaultTask(void *argument)
     }
     bmm350_enable_axes(BMM350_X_EN, BMM350_Y_EN, BMM350_Z_EN, &bmm350);
     bmm350_set_powermode(BMM350_NORMAL_MODE, &bmm350);
+}
 
-#ifdef BNO055_PRESENT
+/**
+ * Init and configure the BNO055 connected to QWIIC
+ *
+ * On error jump to ErrorHandler
+ */
+void PERIF_BNO055_Init() {
     /* Setup BNO055 (on qwiic port) */
     bno055.bus_read = &stm32_bno055_bus_read;
     bno055.bus_write = &stm32_bno055_bus_write;
@@ -1028,15 +1264,28 @@ void StartDefaultTask(void *argument)
     s8 bno055_res = bno055_init(&bno055);
     if (bno055_res != 0) {
         LOG_ERROR("BNO055 initialization failed: %d", bno055_res);
+        Error_Handler();
     } else {
         LOG_INFO("BNO055 initialization complete!");
     }
-#endif
+}
 
-    rgb_led_set_color(RGB_LED_COLOR_CYAN);
-
+/**
+ * Init and configure the dynamixel servos. Ping
+ * the servos to check if they are ready for use.
+ * This setup requires DMA and notifications, so do this
+ * only from a task.
+ *
+ * On error jump to Error_Handler
+ */
+void PERIF_Dynamixel_Init() {
     dynamixel_uart_context.huart = &huart6;
     dynamixel_uart_context.callerThread = osThreadGetId();
+
+    if (dynamixel_uart_context.callerThread == NULL) {
+        LOG_ERROR("dynamixel_uart_context.callerThread is NULL");
+        Error_Handler();
+    }
 
     DYNAMIXEL_ERROR_CHECK(
         dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, &dynamixel_uart_context
@@ -1057,8 +1306,23 @@ void StartDefaultTask(void *argument)
         LOG_ERROR("Failed to initialize %d servos", error_count);
         Error_Handler();
     }
+}
 
-    rgb_led_set_color(RGB_LED_COLOR_GREEN);
+/* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+    (void) argument;
+
+    PERIF_Dynamixel_Init();
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
@@ -1077,12 +1341,26 @@ void StartDefaultTask(void *argument)
     controller_init(&controller_ctx);
     controller_set_state_callback(&controller_ctx, stm32_state_change_cb, NULL);
 
+    running_avg_t servo_read_ticks, servo_write_ticks, controller_update_ticks;
+
+    running_avg_init(&servo_read_ticks);
+    running_avg_init(&servo_write_ticks);
+    running_avg_init(&controller_update_ticks);
+
+    TickType_t t0, t1;
+    int clock = 0;
+
+    xEventGroupSetBits(systemEventsHandle, EVT_CONTROLLER_READY);
+
     /* Infinite loop */
     for (;;) {
+        clock++;
+
         cmd.velocity = updated_velocity;
         cmd.heading = updated_heading;
         cmd.height = updated_height;
 
+        t0 = xTaskGetTickCount();
         // Determine the actual servo positions
         for (int i = 0; i < 6; i++) {
             struct leg_state *current_leg_state = &controller_ctx.robot.leg_state[i];
@@ -1125,9 +1403,15 @@ void StartDefaultTask(void *argument)
                 current_leg_state->actual_joint_angles[2] = compensated_angles[2] * (1 - alpha) + alpha * current_leg_state->next_joint_angles[2];
             }
         }
+        t1 = xTaskGetTickCount();
+        running_avg_add(&servo_read_ticks, t1-t0);
 
+        t0 = xTaskGetTickCount();
         controller_update(&controller_ctx, &attitude, &cmd, MAIN_LOOP_INTERVAL / 1000);
+        t1 = xTaskGetTickCount();
+        running_avg_add(&controller_update_ticks, t1-t0);
 
+        t0 = xTaskGetTickCount();
         // Write next values to the servos
         if (controller_ctx.state != CTRL_POWERDOWN) {
             for (int i = 0; i < 6; i++) {
@@ -1164,8 +1448,25 @@ void StartDefaultTask(void *argument)
                 write_next_servo_position(leg_servos, 3, leg_servo_angles);
             }
         }
+        t1 = xTaskGetTickCount();
+        running_avg_add(&servo_write_ticks, t1-t0);
 
-        // Schedule at fixed 1 Hz
+        // FIXME clock is a horrible way to print data periodically, do better.
+        if (clock % (5) == 0) {
+            LOG_INFO("[EKF] roll %5.2f, pitch %5.2f, yaw %5.2f",
+                ekf_out.roll, ekf_out.pitch, ekf_out.yaw
+            );
+        }
+
+        if (clock % (5 * 30) == 0) {
+            LOG_INFO("Average read ticks %ld, write ticks %ld, controller ticks %ld",
+                running_avg_get(&servo_read_ticks),
+                running_avg_get(&servo_write_ticks),
+                running_avg_get(&controller_update_ticks)
+            );
+        }
+
+        // Schedule at fixed 5 Hz
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(MAIN_LOOP_INTERVAL));
     }
   /* USER CODE END 5 */
@@ -1180,9 +1481,16 @@ void StartDefaultTask(void *argument)
 /* USER CODE END Header_StartSpiSlaveTask */
 void StartSpiSlaveTask(void *argument)
 {
-    (void)argument;
-
   /* USER CODE BEGIN StartSpiSlaveTask */
+    UNUSED(argument);
+
+    // Wait for the controller to become ready
+    xEventGroupWaitBits(systemEventsHandle,
+                EVT_CONTROLLER_READY,
+                pdFALSE,
+                pdTRUE,
+                portMAX_DELAY);
+
     // Message format (7 bytes)
     //   uint8_t magic
     //   uint8_t reserved
@@ -1271,6 +1579,284 @@ void StartSpiSlaveTask(void *argument)
         }
     }
   /* USER CODE END StartSpiSlaveTask */
+}
+
+/* USER CODE BEGIN Header_StartGyroTask */
+/**
+* @brief Function implementing the gyroTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartGyroTask */
+void StartGyroTask(void *argument)
+{
+  /* USER CODE BEGIN StartGyroTask */
+    UNUSED(argument);
+
+    // Wait for the EKF to become ready
+    xEventGroupWaitBits(systemEventsHandle,
+                EVT_EKF_READY,
+                pdFALSE,
+                pdTRUE,
+                portMAX_DELAY);
+
+    struct bmi08_gyro_int_channel_cfg gyro_int_cfg = {
+        .int_channel = BMI08_INT_CHANNEL_3,
+        .int_type = BMI08_GYRO_INT_DATA_RDY,
+        .int_pin_cfg = {
+            BMI08_INT_ACTIVE_LOW,
+            BMI08_INT_MODE_PUSH_PULL,
+            BMI08_ENABLE
+        }
+    };
+
+    if (bmi08g_set_int_config(&gyro_int_cfg, &bmi088) < 0) {
+        LOG_ERROR("[GyroTask] Failed to set interrupt config");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    sensor_sample_t sample;
+    struct bmi08_sensor_data gyro;
+
+    gyro_interrupt_enable = 1;
+
+  /* Infinite loop */
+    for (;;) {
+        // Wait for interrupt
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        // Only one task can use SPI at a time
+        if (xSemaphoreTake(spiMutexHandle, (TickType_t) 1) != pdTRUE) {
+            continue;
+        }
+
+        // Read BMI088 gyro (SPI)
+        if (bmi08g_get_data(&gyro, &bmi088) != 0) {
+            LOG_ERROR("[GyroTask] Failed to get data");
+            continue;
+        }
+
+        xSemaphoreGive(spiMutexHandle);
+
+        sample.data[0] = gyro.x;
+        sample.data[1] = gyro.y;
+        sample.data[2] = gyro.z;
+
+        sample.type = SENSOR_GYRO;
+        sample.tick = xTaskGetTickCount();
+
+        // Non-blocking send (gyro is high rate)
+        xQueueSendToBack(ekf_queueHandle, &sample, 0);
+    }
+  /* USER CODE END StartGyroTask */
+}
+
+/* USER CODE BEGIN Header_StartAccelTask */
+/**
+* @brief Function implementing the accelTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartAccelTask */
+void StartAccelTask(void *argument)
+{
+  /* USER CODE BEGIN StartAccelTask */
+    UNUSED(argument);
+
+    // Wait for the EKF to become ready
+    xEventGroupWaitBits(systemEventsHandle,
+                EVT_EKF_READY,
+                pdFALSE,
+                pdTRUE,
+                portMAX_DELAY);
+
+    // Enable the accelerometer interrupt
+    struct bmi08_accel_int_channel_cfg accel_int_cfg = {
+        .int_channel = BMI08_INT_CHANNEL_1,
+        .int_type = BMI08_ACCEL_INT_DATA_RDY,
+        .int_pin_cfg = {
+            BMI08_INT_ACTIVE_LOW,
+            BMI08_INT_MODE_PUSH_PULL,
+            BMI08_ENABLE
+        }
+    };
+
+    if (bmi08a_set_int_config(&accel_int_cfg, &bmi088) < 0) {
+        LOG_ERROR("[AccelTask] Failed to set interrupt config");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    sensor_sample_t sample;
+    struct bmi08_sensor_data accel;
+
+    accel_interrupt_enable = 1;
+
+    /* Infinite loop */
+    for (;;) {
+        // Wait for interrupt
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        // Only one task can use SPI at a time
+        if (xSemaphoreTake(spiMutexHandle, (TickType_t) 5) != pdTRUE) {
+            continue;
+        }
+
+        // Read BMI088 gyro (SPI)
+        if (bmi08a_get_data(&accel, &bmi088) != 0) {
+            LOG_ERROR("[AccelTask] Failed to get data");
+            continue;
+        }
+
+        xSemaphoreGive(spiMutexHandle);
+
+        sample.data[0] = accel.x;
+        sample.data[1] = accel.y;
+        sample.data[2] = accel.z;
+
+        sample.type = SENSOR_ACCEL;
+        sample.tick = xTaskGetTickCount();
+
+        // Blocking send (accel is not that high rate)
+        xQueueSendToBack(ekf_queueHandle, &sample, 5);
+    }
+  /* USER CODE END StartAccelTask */
+}
+
+/* USER CODE BEGIN Header_StartMagTask */
+/**
+* @brief Function implementing the magTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartMagTask */
+void StartMagTask(void *argument)
+{
+  /* USER CODE BEGIN StartMagTask */
+    UNUSED(argument);
+
+    // Wait for the EKF to become ready
+    xEventGroupWaitBits(systemEventsHandle,
+                EVT_EKF_READY,
+                pdFALSE,
+                pdTRUE,
+                portMAX_DELAY);
+
+    sensor_sample_t sample;
+    struct bmm350_mag_temp_data data;
+
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+
+    /* Infinite loop */
+    for(;;) {
+        if (bmm350_get_compensated_mag_xyz_temp_data(&data, &bmm350) < 0) {
+            LOG_ERROR("[MagTask] Failed to get data");
+        } else {
+            sample.data[0] = data.x;
+            sample.data[1] = data.y;
+            sample.data[2] = data.z;
+            sample.type = SENSOR_MAG;
+
+            // Blocking send (mag is not low rate)
+            xQueueSendToBack(ekf_queueHandle, &sample, 10);
+        }
+
+        // Schedule at 5 Hz
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000 / 5));
+    }
+  /* USER CODE END StartMagTask */
+}
+
+/* USER CODE BEGIN Header_StartEkfTask */
+/**
+* @brief Function implementing the ekfTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartEkfTask */
+void StartEkfTask(void *argument)
+{
+  /* USER CODE BEGIN StartEkfTask */
+    UNUSED(argument);
+
+    attitude_ekf_t ekf;
+    sensor_sample_t sample;
+    TickType_t last_gyro_tick = 0;
+
+    float32_t accel_snapshot[3];
+
+    attitude_ekf_init(&ekf);
+
+    // Wait for the controller to become ready
+    xEventGroupWaitBits(systemEventsHandle,
+                EVT_CONTROLLER_READY,
+                pdFALSE,
+                pdTRUE,
+                portMAX_DELAY);
+
+    // Signal ready
+    xEventGroupSetBits(systemEventsHandle, EVT_EKF_READY);
+
+    for (;;) {
+        if (xQueueReceive(ekf_queueHandle, &sample, portMAX_DELAY)) {
+
+            if (sample.type == SENSOR_GYRO) {
+                float32_t dt = (sample.tick - last_gyro_tick) * portTICK_PERIOD_MS * 0.001f;
+                last_gyro_tick = sample.tick;
+
+                attitude_ekf_predict(&ekf, sample.data, dt);
+            }
+            else if (sample.type == SENSOR_ACCEL) {
+                float32_t roll, pitch;
+                compute_roll_pitch(sample.data, &roll, &pitch);
+
+                attitude_ekf_update_accel(&ekf, roll, pitch);
+
+                // Update snapshot for usage in mag
+                accel_snapshot[0] = sample.data[0];
+                accel_snapshot[1] = sample.data[1];
+                accel_snapshot[2] = sample.data[2];
+            }
+            else if (sample.type == SENSOR_MAG) {
+                float32_t yaw = compute_yaw_from_mag(accel_snapshot, sample.data);
+
+                attitude_ekf_update_mag(&ekf, yaw);
+            }
+
+            // Update with our latest state
+            ekf_out.roll = ekf.x[0];
+            ekf_out.pitch = ekf.x[1];
+            ekf_out.yaw = ekf.x[2];
+            ekf_out.gyro_bias[0] = ekf.x[3];
+            ekf_out.gyro_bias[1] = ekf.x[4];
+            ekf_out.gyro_bias[2] = ekf.x[5];
+            ekf_out.last_update_ts = sample.tick;
+        }
+    }
+  /* USER CODE END StartEkfTask */
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM2 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM2)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
 }
 
 /**

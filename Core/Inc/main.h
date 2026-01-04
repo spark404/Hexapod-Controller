@@ -57,14 +57,18 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define EVT_CONTROLLER_READY 0x1
+#define EVT_EKF_READY 0x2
 #define SPI2_CS_ACC_Pin GPIO_PIN_0
 #define SPI2_CS_ACC_GPIO_Port GPIOC
 #define SPI2_CS_GYR_Pin GPIO_PIN_1
 #define SPI2_CS_GYR_GPIO_Port GPIOC
 #define SPI2_INT_ACC_Pin GPIO_PIN_0
 #define SPI2_INT_ACC_GPIO_Port GPIOA
+#define SPI2_INT_ACC_EXTI_IRQn EXTI0_IRQn
 #define SPI2_INT_GYR_Pin GPIO_PIN_1
 #define SPI2_INT_GYR_GPIO_Port GPIOA
+#define SPI2_INT_GYR_EXTI_IRQn EXTI1_IRQn
 #define ST_LED_B_Pin GPIO_PIN_14
 #define ST_LED_B_GPIO_Port GPIOA
 #define ST_LED_R_Pin GPIO_PIN_15

@@ -74,6 +74,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         Core/Src/servos.c
         Core/Src/rgb_led.c
         Core/Src/controller.c
+        Core/Src/measure.c
+        Core/Src/attitude_measurement.c
+        Core/Src/attitude_ekf.c
         Drivers/BMI08X/Src/bmi08a.c
         Drivers/BMI08X/Src/bmi08g.c
         Drivers/BMI08X/Src/bmi08xa.c
@@ -102,6 +105,10 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
 
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
         -Wall -Wextra -pedantic -Werror
+)
+
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+        -u _printf_float
 )
 
 # Remove wrong libob.a library dependency when using cpp files
