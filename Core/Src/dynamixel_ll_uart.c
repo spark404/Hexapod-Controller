@@ -45,7 +45,7 @@ ssize_t dynamixel_write_uart_dma(const uint8_t *txBuffer, const size_t size, voi
 
 	if (flags == DYNAMIXEL_DMA_ERR) {
 		HAL_UART_DMAStop(huart);
-		LOG_DEBUG("dynamixel_write_uart_dma: uart error %d", huart->ErrorCode);
+		LOG_DEBUG("dynamixel_write_uart_dma: uart error %ld", huart->ErrorCode);
 		return -1;
 	}
 
@@ -86,7 +86,7 @@ ssize_t dynamixel_read_uart_dma(uint8_t *rxBuffer, const size_t size, void *pvCo
 
 	if (flags == DYNAMIXEL_DMA_ERR) {
 		HAL_UART_DMAStop(huart);
-		LOG_DEBUG("dynamixel_read_uart_dma: uart error %d", huart->ErrorCode);
+		LOG_DEBUG("dynamixel_read_uart_dma: uart error %ld", huart->ErrorCode);
 		return -1;
 	}
 
