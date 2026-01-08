@@ -8,6 +8,8 @@
 #include "FreeRTOS.h"
 #include "arm_math.h"
 
+#define GRAVITY (9.80665f)
+
 typedef enum {
     SENSOR_GYRO,
     SENSOR_ACCEL,

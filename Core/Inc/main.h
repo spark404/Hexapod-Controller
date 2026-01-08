@@ -77,9 +77,9 @@ void Error_Handler(void);
 #define ST_LED_G_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */
-#define SPI_TX_CPLT 0x01
-#define SPI_RX_CPLT 0x02
-#define SPI_ERR     0x04
+#define SPI1_TX_CPLT 0x01
+#define SPI1_RX_CPLT 0x02
+#define SPI1_ERROR     0x04
 
 /* USER CODE END Private defines */
 

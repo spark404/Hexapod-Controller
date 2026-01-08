@@ -135,7 +135,7 @@ const osThreadAttr_t defaultTask_attributes = {
 osThreadId_t spiSlaveTaskHandle;
 const osThreadAttr_t spiSlaveTask_attributes = {
   .name = "spiSlaveTask",
-  .stack_size = 512 * 4,
+  .stack_size = 2048 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for gyroTask */
@@ -163,7 +163,7 @@ const osThreadAttr_t magTask_attributes = {
 osThreadId_t ekfTaskHandle;
 const osThreadAttr_t ekfTask_attributes = {
   .name = "ekfTask",
-  .stack_size = 2048 * 4,
+  .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for ekf_queue */
@@ -211,6 +211,10 @@ ekf_output_t ekf_out;
 
 uint8_t gyro_interrupt_enable = 0;
 uint8_t accel_interrupt_enable = 0;
+
+float32_t gyro_snapshot[3];
+float32_t accel_snapshot[3];
+float32_t mag_snapshot[3];
 
 /* USER CODE END PV */
 
@@ -939,6 +943,56 @@ void stm32_bmi08_delay_us(uint32_t period, void *intf_ptr) {
     while (__HAL_TIM_GET_COUNTER(&htim1) < period); // wait for the counter to reach the us input in the parameter
 }
 
+/**
+ * Scales the raw values from the BMI088 accelerometer to mg
+ *
+ * @param raw The raw sensor value
+ * @param accel_range The range configured in the sensor
+ * @return The scaled value in mg
+ */
+static inline float32_t stm32_bmi08a_scale_data(int16_t raw, uint8_t accel_range) {
+    return (float32_t)raw * 1500.0f * (float32_t)(1 << (accel_range + 1)) / 32768.0f;
+}
+
+static inline float32_t stm32_bmi08g_scale_data(int16_t raw, uint8_t gyro_range)
+{
+    const float base_lsb_per_dps = 16.384f;
+    float32_t lsb_per_dps = base_lsb_per_dps * (float32_t)(1 << gyro_range);
+    return (float)raw / lsb_per_dps;
+}
+
+/**
+ * Convert accel sensor frame to NED Frame
+ * On the PCB the sensor is rotated 90deg counter clock wise.
+ *
+ * @param sensor The measured values in sensor frame
+ * @param ned The measure values in the NED frame
+ */
+static inline void stm32_bmi08a_sensor_to_ned(const float32_t sensor[3], float32_t ned[3]) {
+    ned[0] = sensor[1];
+    ned[1] = -sensor[0];
+    ned[2] = sensor[2];
+}
+
+/**
+ * Convert gyro sensor frame to NED Frame
+ * On the PCB the sensor is rotated 90deg counter clock wise.
+ *
+ * @param sensor The measured values in sensor frame
+ * @param ned The measure values in the NED frame
+ */
+static inline void stm32_bmi08g_sensor_to_ned(const float32_t sensor[3], float32_t ned[3]) {
+    ned[0] = -sensor[1];
+    ned[1] = sensor[0];
+    ned[2] = -sensor[2];
+}
+
+static inline void stm32_bmm350_sensor_to_ned(const float32_t sensor[3], float32_t ned[3]) {
+    ned[0] = -sensor[0];
+    ned[1] = -sensor[1];
+    ned[2] = sensor[2];
+}
+
 int8_t stm32_bno055_bus_write(uint8_t dev_addr, uint8_t reg_addr, uint8_t *reg_data, uint8_t wr_len) {
     uint16_t address = (uint16_t) dev_addr << 1;
 
@@ -1019,11 +1073,7 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi) {
     }
 
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-    // Give semaphore to unblock the receive task
-    osThreadFlagsSet(spiSlaveTaskHandle, SPI_RX_CPLT);
-
-    // Request context switch if needed
+    osThreadFlagsSet(spiSlaveTaskHandle, SPI1_RX_CPLT);
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
@@ -1033,13 +1083,7 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi) {
     }
 
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-    LOG_DEBUG("HAL_SPI_ErrorCallback: %ld", hspi->ErrorCode);
-
-    // Give semaphore to unblock the receive task
-    osThreadFlagsSet(spiSlaveTaskHandle, SPI_ERR);
-
-    // Request context switch if needed
+    osThreadFlagsSet(spiSlaveTaskHandle, SPI1_ERROR);
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
@@ -1214,6 +1258,13 @@ void PERIF_BMI088_Init() {
         Error_Handler();
     } else {
         LOG_INFO("BMI088 accel config complete!");
+    }
+
+    bmi088_res = bmi08a_set_power_mode(&bmi088);
+    if (bmi088_res != 0) {
+        LOG_ERROR("BMI088 accel power mode config failed: %d", bmi088_res);
+    } else {
+        LOG_INFO("BMI088 accel power mode config complete!");
     }
 
     bmi088_res = bmi08a_set_int_config(&accel_int_cfg, &bmi088);
@@ -1452,10 +1503,15 @@ void StartDefaultTask(void *argument)
         running_avg_add(&servo_write_ticks, t1-t0);
 
         // FIXME clock is a horrible way to print data periodically, do better.
-        if (clock % (5) == 0) {
+        if (clock % (5 * 5) == 0) {
+            LOG_INFO("[GYR] x %5.2f, y %5.2f, z %5.2f",
+                gyro_snapshot[0], gyro_snapshot[1], gyro_snapshot[2]);
+            LOG_INFO("[ACC] x %5.2f, y %5.2f, z %5.2f",
+                accel_snapshot[0], accel_snapshot[1], accel_snapshot[2]);
+            LOG_INFO("[MAG] x %.8f, y %.8f, z %.8f",
+                mag_snapshot[0], mag_snapshot[1], mag_snapshot[2]);
             LOG_INFO("[EKF] roll %5.2f, pitch %5.2f, yaw %5.2f",
-                ekf_out.roll, ekf_out.pitch, ekf_out.yaw
-            );
+                ekf_out.roll, ekf_out.pitch, ekf_out.yaw);
         }
 
         if (clock % (5 * 30) == 0) {
@@ -1511,7 +1567,7 @@ void StartSpiSlaveTask(void *argument)
             continue;
         }
 
-        const uint32_t flags = osThreadFlagsWait(SPI_RX_CPLT | SPI_ERR, osFlagsWaitAny, portMAX_DELAY);
+        const uint32_t flags = osThreadFlagsWait(SPI1_RX_CPLT | SPI1_ERROR, osFlagsWaitAny, portMAX_DELAY);
         if (flags == (uint32_t) osErrorTimeout) {
             LOG_DEBUG("[StartSpiSlaveTask] osThreadFlagsWait timeout");
             continue;
@@ -1523,7 +1579,7 @@ void StartSpiSlaveTask(void *argument)
             continue;
         }
 
-        if (flags == SPI_ERR) {
+        if (flags == SPI1_ERROR) {
             LOG_DEBUG("[StartSpiSlaveTask] receive error");
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
@@ -1618,6 +1674,8 @@ void StartGyroTask(void *argument)
 
     sensor_sample_t sample;
     struct bmi08_sensor_data gyro;
+    uint8_t range = bmi088.gyro_cfg.range;
+    float32_t sensor_frame_data[3];
 
     gyro_interrupt_enable = 1;
 
@@ -1639,9 +1697,11 @@ void StartGyroTask(void *argument)
 
         xSemaphoreGive(spiMutexHandle);
 
-        sample.data[0] = gyro.x;
-        sample.data[1] = gyro.y;
-        sample.data[2] = gyro.z;
+        // Scale and convert to rad/s
+        sensor_frame_data[0] = stm32_bmi08g_scale_data(gyro.x, range) * (float32_t)(M_PI / 180.0f);
+        sensor_frame_data[1] = stm32_bmi08g_scale_data(gyro.y, range) * (float32_t)(M_PI / 180.0f);
+        sensor_frame_data[2] = stm32_bmi08g_scale_data(gyro.z, range) * (float32_t)(M_PI / 180.0f);
+        stm32_bmi08g_sensor_to_ned(sensor_frame_data, sample.data);
 
         sample.type = SENSOR_GYRO;
         sample.tick = xTaskGetTickCount();
@@ -1691,7 +1751,11 @@ void StartAccelTask(void *argument)
     sensor_sample_t sample;
     struct bmi08_sensor_data accel;
 
+
     accel_interrupt_enable = 1;
+
+    uint8_t range = bmi088.accel_cfg.range;
+    float32_t sensor_frame_data[3];
 
     /* Infinite loop */
     for (;;) {
@@ -1711,9 +1775,11 @@ void StartAccelTask(void *argument)
 
         xSemaphoreGive(spiMutexHandle);
 
-        sample.data[0] = accel.x;
-        sample.data[1] = accel.y;
-        sample.data[2] = accel.z;
+        // Scale and convert to m/s2
+        sensor_frame_data[0] = stm32_bmi08a_scale_data(accel.x, range) * GRAVITY / 1000;
+        sensor_frame_data[1] = stm32_bmi08a_scale_data(accel.y, range) * GRAVITY / 1000;
+        sensor_frame_data[2] = stm32_bmi08a_scale_data(accel.z, range) * GRAVITY / 1000;
+        stm32_bmi08a_sensor_to_ned(sensor_frame_data, sample.data);
 
         sample.type = SENSOR_ACCEL;
         sample.tick = xTaskGetTickCount();
@@ -1745,17 +1811,30 @@ void StartMagTask(void *argument)
 
     sensor_sample_t sample;
     struct bmm350_mag_temp_data data;
+    float32_t sensor_frame_data[3];
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
+
+    float32_t bias[3] = { +37, -24, +35 };
 
     /* Infinite loop */
     for(;;) {
         if (bmm350_get_compensated_mag_xyz_temp_data(&data, &bmm350) < 0) {
             LOG_ERROR("[MagTask] Failed to get data");
         } else {
-            sample.data[0] = data.x;
-            sample.data[1] = data.y;
-            sample.data[2] = data.z;
+            // Convert sensor frame to NED
+            // Values reported in uT (micro Tesla)
+            sensor_frame_data[0] = data.x;
+            sensor_frame_data[1] = data.y;
+            sensor_frame_data[2] = data.z;
+
+            stm32_bmm350_sensor_to_ned(sensor_frame_data, sample.data);
+
+            // apply bias
+            sample.data[0] = sample.data[0] - bias[0];
+            sample.data[1] = sample.data[1] - bias[1];
+            sample.data[2] = sample.data[2] - bias[2];
+
             sample.type = SENSOR_MAG;
 
             // Blocking send (mag is not low rate)
@@ -1784,8 +1863,6 @@ void StartEkfTask(void *argument)
     sensor_sample_t sample;
     TickType_t last_gyro_tick = 0;
 
-    float32_t accel_snapshot[3];
-
     attitude_ekf_init(&ekf);
 
     // Wait for the controller to become ready
@@ -1806,6 +1883,10 @@ void StartEkfTask(void *argument)
                 last_gyro_tick = sample.tick;
 
                 attitude_ekf_predict(&ekf, sample.data, dt);
+
+                gyro_snapshot[0] = sample.data[0];
+                gyro_snapshot[1] = sample.data[1];
+                gyro_snapshot[2] = sample.data[2];
             }
             else if (sample.type == SENSOR_ACCEL) {
                 float32_t roll, pitch;
@@ -1819,9 +1900,16 @@ void StartEkfTask(void *argument)
                 accel_snapshot[2] = sample.data[2];
             }
             else if (sample.type == SENSOR_MAG) {
-                float32_t yaw = compute_yaw_from_mag(accel_snapshot, sample.data);
+                float32_t mag_n[3];
+                arm_vec_normalize_f32(sample.data, mag_n, 3);
+
+                float32_t yaw = compute_yaw_from_mag(accel_snapshot, mag_n);
 
                 attitude_ekf_update_mag(&ekf, yaw);
+
+                mag_snapshot[0] = sample.data[0];
+                mag_snapshot[1] = sample.data[1];
+                mag_snapshot[2] = sample.data[2];
             }
 
             // Update with our latest state
