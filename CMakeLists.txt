@@ -52,7 +52,7 @@ FetchContent_MakeAvailable(HexapodMath)
 FetchContent_Declare(
         dynamixel
         GIT_REPOSITORY https://github.com/spark404/dynamixel.git
-        GIT_TAG "c0506211516ffbb7a5034d29b25d2752502b4080"
+        GIT_TAG "49a833be18d58e501a085875925efdc34a471331"
         GIT_PROGRESS ON
         GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
 )
@@ -77,6 +77,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         Core/Src/measure.c
         Core/Src/attitude_measurement.c
         Core/Src/attitude_ekf.c
+        Core/Src/ring_buffer.c
         Drivers/BMI08X/Src/bmi08a.c
         Drivers/BMI08X/Src/bmi08g.c
         Drivers/BMI08X/Src/bmi08xa.c

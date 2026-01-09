@@ -22,6 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -35,6 +36,8 @@
 #include "bmm350.h"
 #include "bmi08x.h"
 #include "bno055.h"
+
+#include "ring_buffer.h"
 
 #include "dynamixel/dynamixel.h"
 #include "dynamixel_ll_uart.h"
@@ -79,6 +82,11 @@ typedef struct {
     TickType_t last_update_ts;
 } ekf_output_t;
 
+typedef struct {
+    uint8_t *data;
+    uint16_t len;
+} tx_msg_t;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -100,6 +108,15 @@ arm_mat_init_f32(&M, S, S, p ## M ## Data)
 MATRIX(M, 4)
 
 #define MAIN_LOOP_INTERVAL 200.0f // ms
+
+#define DMA_RX_BUF_SIZE 1024 // Can handle 2.5ms of data at 4Mbps
+#define RX_RING_SIZE 4096    // Enough space to handle driver delay
+
+#define RX_DMA_TC 0x1
+#define RX_DMA_HT 0x2
+#define RX_DMA_IDLE 0x4
+#define RX_DMA_ERROR 0x8
+#define TX_DMA_TC 0x01
 
 /* USER CODE END PD */
 
@@ -166,15 +183,49 @@ const osThreadAttr_t ekfTask_attributes = {
   .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
+/* Definitions for usartRxTask */
+osThreadId_t usartRxTaskHandle;
+const osThreadAttr_t usartRxTask_attributes = {
+  .name = "usartRxTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for usartTxTask */
+osThreadId_t usartTxTaskHandle;
+const osThreadAttr_t usartTxTask_attributes = {
+  .name = "usartTxTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* Definitions for ekf_queue */
 osMessageQueueId_t ekf_queueHandle;
 const osMessageQueueAttr_t ekf_queue_attributes = {
   .name = "ekf_queue"
 };
+/* Definitions for usart_tx_queue */
+osMessageQueueId_t usart_tx_queueHandle;
+const osMessageQueueAttr_t usart_tx_queue_attributes = {
+  .name = "usart_tx_queue"
+};
 /* Definitions for spiMutex */
 osMutexId_t spiMutexHandle;
 const osMutexAttr_t spiMutex_attributes = {
   .name = "spiMutex"
+};
+/* Definitions for usartMutex */
+osMutexId_t usartMutexHandle;
+const osMutexAttr_t usartMutex_attributes = {
+  .name = "usartMutex"
+};
+/* Definitions for usart_rx_sem */
+osSemaphoreId_t usart_rx_semHandle;
+const osSemaphoreAttr_t usart_rx_sem_attributes = {
+  .name = "usart_rx_sem"
+};
+/* Definitions for usart_tx_sem */
+osSemaphoreId_t usart_tx_semHandle;
+const osSemaphoreAttr_t usart_tx_sem_attributes = {
+  .name = "usart_tx_sem"
 };
 /* Definitions for systemEvents */
 osEventFlagsId_t systemEventsHandle;
@@ -216,6 +267,12 @@ float32_t gyro_snapshot[3];
 float32_t accel_snapshot[3];
 float32_t mag_snapshot[3];
 
+// USART buffers
+static uint8_t dma_rx_buf[DMA_RX_BUF_SIZE];
+static uint8_t rx_ring_buffer[RX_RING_SIZE];
+static ringbuf_t rx_ring;
+static size_t dma_rx_read_idx = 0;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -237,6 +294,8 @@ void StartGyroTask(void *argument);
 void StartAccelTask(void *argument);
 void StartMagTask(void *argument);
 void StartEkfTask(void *argument);
+void StartUsartRxTask(void *argument);
+void StartUsartTxTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 int __io_putchar(int ch);
@@ -258,6 +317,13 @@ int8_t stm32_bno055_bus_write(uint8_t dev_addr, uint8_t reg_addr, uint8_t *reg_d
 int8_t stm32_bno055_bus_read(uint8_t dev_addr, uint8_t reg_addr, uint8_t *reg_data, uint8_t r_len);
 
 void stm32_bno055_delay_us(u32 period);
+
+ssize_t usart_read(uint8_t *dst, size_t len, TickType_t timeout);
+ssize_t usart_write(const uint8_t *src, size_t len, TickType_t timeout);
+
+ssize_t dynamixel_read_uart_dma_new(uint8_t *rxBuffer, size_t size, void *pvContext);
+ssize_t dynamixel_write_uart_dma_new(const uint8_t *txBuffer, size_t size, void *pvContext);
+
 
 void PERIF_BMI088_Init();
 void PERIF_BMM350_Init();
@@ -317,20 +383,22 @@ int main(void)
     LOG_INFO("[Main] Hexapod Control Firmware");
     LOG_INFO("[Main] Build: %s %s", __DATE__, __TIME__);
 
-    LOG_INFO("[Main] Starting peripheral init");
+    LOG_INFO("[Main] Core initialisation");
+    ringbuf_init(&rx_ring, rx_ring_buffer, sizeof(rx_ring_buffer));
+
+    LOG_INFO("[Main] Peripheral initialisation");
     HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_RESET);
 
-    PERIF_BMI088_Init();
-    PERIF_BMM350_Init();
+    // PERIF_BMI088_Init();
+    // PERIF_BMM350_Init();
     // PERIF_BNO055_Init();
 
-    LOG_INFO("[Main] Peripheral init complete");
+    LOG_INFO("[Main] Initialisation complete");
     HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_SET);
-
 
   /* USER CODE END 2 */
 
@@ -340,9 +408,19 @@ int main(void)
   /* creation of spiMutex */
   spiMutexHandle = osMutexNew(&spiMutex_attributes);
 
+  /* creation of usartMutex */
+  usartMutexHandle = osMutexNew(&usartMutex_attributes);
+
   /* USER CODE BEGIN RTOS_MUTEX */
     /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
+
+  /* Create the semaphores(s) */
+  /* creation of usart_rx_sem */
+  usart_rx_semHandle = osSemaphoreNew(4096, 0, &usart_rx_sem_attributes);
+
+  /* creation of usart_tx_sem */
+  usart_tx_semHandle = osSemaphoreNew(4096, 0, &usart_tx_sem_attributes);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* USER CODE END RTOS_SEMAPHORES */
@@ -354,6 +432,9 @@ int main(void)
   /* Create the queue(s) */
   /* creation of ekf_queue */
   ekf_queueHandle = osMessageQueueNew (32, sizeof(sensor_sample_t), &ekf_queue_attributes);
+
+  /* creation of usart_tx_queue */
+  usart_tx_queueHandle = osMessageQueueNew (16, sizeof(tx_msg_t), &usart_tx_queue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
     /* add queues, ... */
@@ -377,6 +458,12 @@ int main(void)
 
   /* creation of ekfTask */
   ekfTaskHandle = osThreadNew(StartEkfTask, NULL, &ekfTask_attributes);
+
+  /* creation of usartRxTask */
+  usartRxTaskHandle = osThreadNew(StartUsartRxTask, (void*) &huart6, &usartRxTask_attributes);
+
+  /* creation of usartTxTask */
+  usartTxTaskHandle = osThreadNew(StartUsartTxTask, (void*) &huart6, &usartTxTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
     rgb_led_init();
@@ -424,22 +511,27 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+  RCC_OscInitStruct.PLL.PLLM = 16;
+  RCC_OscInitStruct.PLL.PLLN = 336;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
+  RCC_OscInitStruct.PLL.PLLQ = 7;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
-    Error_Handler();
+    // Error_Handler();
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -841,7 +933,7 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-#define DEBUG_USART USART1
+#define DEBUG_USART USART2
 int __io_putchar(int ch) {
     while (!LL_USART_IsActiveFlag_TXE(DEBUG_USART)) {
     }
@@ -1027,17 +1119,120 @@ void stm32_bno055_delay_us(u32 period) {
     while (__HAL_TIM_GET_COUNTER(&htim1) < period); // wait for the counter to reach the us input in the parameter
 }
 
+ssize_t usart_read(uint8_t *dst, const size_t len, const TickType_t timeout) {
+    size_t count = 0;
+
+    if (len == 0) {
+        return 0;
+    }
+
+    /* Ensure only one reader */
+    if (xSemaphoreTake(usartMutexHandle, timeout) != pdTRUE) {
+        return -1;
+    }
+
+    taskENTER_CRITICAL();
+    size_t avail = ringbuf_available(&rx_ring);
+    taskEXIT_CRITICAL();
+    LOG_DEBUG("[usart_read] %d bytes in ring", avail);
+
+    size_t to_read = avail > len ? len : avail;
+
+    taskENTER_CRITICAL();
+    count = ringbuf_read(&rx_ring, dst, to_read);
+    taskEXIT_CRITICAL();
+
+    // Shortcut if everything was read from the ringbuffer
+    if (count == len) {
+        xSemaphoreGive(usartMutexHandle);
+        LOG_DEBUG("[usart_read] return %d bytes as requested", count);
+        return (ssize_t)count;
+    }
+
+    /* Wait for first byte */
+    if (xSemaphoreTake(usart_rx_semHandle, timeout) != pdTRUE) {
+        xSemaphoreGive(usartMutexHandle);
+        LOG_DEBUG("[usart_read] return %d bytes at timeout", count);
+        return (ssize_t)count;   // timeout, partial data
+    }
+
+    /* First byte is guaranteed */
+    taskENTER_CRITICAL();
+    ringbuf_pop(&rx_ring, &dst[count++]);
+    taskEXIT_CRITICAL();
+
+    /* Drain remaining bytes without blocking */
+    while (count < len) {
+        if (xSemaphoreTake(usart_rx_semHandle, 0) != pdTRUE) {
+            break;
+        }
+
+        taskENTER_CRITICAL();
+        ringbuf_pop(&rx_ring, &dst[count++]);
+        taskEXIT_CRITICAL();
+    }
+
+    xSemaphoreGive(usartMutexHandle);
+    LOG_DEBUG("[usart_read] return %d bytes as requested after waiting", count);
+    return (ssize_t)count;
+}
+
+ssize_t usart_write(const uint8_t *src, const size_t len, const TickType_t timeout) {
+    if (len == 0) {
+        return 0;
+    }
+
+    /* Exclusive access */
+    if (xSemaphoreTake(usartMutexHandle, timeout) != pdTRUE) {
+        return -1;
+    }
+
+    /* Prepare TX */
+    tx_msg_t msg = {
+        .data = (uint8_t *)src,
+        .len = len,
+    };
+
+    /* Clear completion semaphore */
+    xSemaphoreTake(usart_tx_semHandle, 0);
+
+    if (xQueueSend(usart_tx_queueHandle, &msg, timeout) != pdTRUE) {
+        xSemaphoreGive(usartMutexHandle);
+        return -1;
+    }
+
+    /* Wait for TX complete */
+    if (xSemaphoreTake(usart_tx_semHandle, timeout) != pdTRUE) {
+        xSemaphoreGive(usartMutexHandle);
+        return -1;
+    }
+
+    xSemaphoreGive(usartMutexHandle);
+    LOG_DEBUG("[usart_write] wrote %d bytes as requested", len);
+    return (ssize_t)len;
+}
+
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
     if (huart != &huart6) {
         return;
     }
 
-    if (servoCallbackThreadId == NULL) {
-        LOG_DEBUG("HAL_UART_ErrorCallback: huart6 TxCplt callback, but no servoCallbackThreadId set");
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+    xTaskNotifyFromISR(usartTxTaskHandle, TX_DMA_TC, eSetBits, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
+
+
+void HAL_UART_RxHalfCpltCallback(UART_HandleTypeDef *huart) {
+    if (huart != &huart6) {
         return;
     }
 
-    osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_TX_CPLT);
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+    xTaskNotifyFromISR(usartRxTaskHandle, RX_DMA_HT, eSetBits, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
@@ -1045,12 +1240,17 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
         return;
     }
 
-    if (servoCallbackThreadId == NULL) {
-        LOG_DEBUG("HAL_UART_ErrorCallback: huart6 RxCplt callback, but no servoCallbackThreadId set");
-        return;
+    uint32_t notify = RX_DMA_TC;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+    if (__HAL_UART_GET_FLAG(huart, UART_FLAG_IDLE)) {
+        notify = RX_DMA_IDLE;
+    } else {
+        notify = RX_DMA_TC;
     }
 
-    osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_RX_CPLT);
+    xTaskNotifyFromISR(usartRxTaskHandle, notify, eSetBits, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
@@ -1058,12 +1258,10 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
         return;
     }
 
-    if (servoCallbackThreadId == NULL) {
-        LOG_DEBUG("HAL_UART_ErrorCallback: huart6 error, but no servoCallbackThreadId set");
-        return;
-    }
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
-    osThreadFlagsSet(servoCallbackThreadId, DYNAMIXEL_DMA_ERR);
+    xTaskNotifyFromISR(usartRxTaskHandle, RX_DMA_ERROR, eSetBits, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 // Callback called by HAL when SPI receive complete (in ISR context)
@@ -1158,6 +1356,48 @@ static void stm32_state_change_cb(
         default:
             break;
     }
+}
+
+static inline size_t dma_rx_write_idx(void)
+{
+    return DMA_RX_BUF_SIZE - __HAL_DMA_GET_COUNTER(huart6.hdmarx);
+}
+
+static void uart_rx_drain_dma(void)
+{
+    bool pushed = false;
+    size_t write = dma_rx_write_idx();
+
+    taskENTER_CRITICAL();
+    while (dma_rx_read_idx != write) {
+        uint8_t b = dma_rx_buf[dma_rx_read_idx];
+        dma_rx_read_idx = (dma_rx_read_idx + 1) % DMA_RX_BUF_SIZE;
+
+        ringbuf_push(&rx_ring, b);
+        pushed = true;
+        // TODO deal with overruns
+    }
+    taskEXIT_CRITICAL();
+
+    if (pushed) {
+        xSemaphoreGive(usart_rx_semHandle);
+    }
+}
+
+ssize_t dynamixel_read_uart_dma_new(
+    uint8_t *rxBuffer,
+    size_t size,
+    void *pvContext) {
+    UNUSED(pvContext);
+    return usart_read(rxBuffer, size, pdMS_TO_TICKS(50));
+}
+
+ssize_t dynamixel_write_uart_dma_new(
+    const uint8_t *txBuffer,
+    size_t size,
+    void *pvContext) {
+    UNUSED(pvContext);
+    return usart_write(txBuffer, size, pdMS_TO_TICKS(50));
 }
 
 /**
@@ -1339,11 +1579,11 @@ void PERIF_Dynamixel_Init() {
     }
 
     DYNAMIXEL_ERROR_CHECK(
-        dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, &dynamixel_uart_context
+        dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma_new, &dynamixel_write_uart_dma_new, &dynamixel_uart_context
         ));
     int error_count = 0;
     for (int i = 0; i < 3 * 6; i++) {
-        LOG_INFO("Configuring Servo %d...", i);
+        LOG_INFO("Checking Servo %d...", i);
 
         DYNAMIXEL_ERROR_CHECK(dynamixel_init(&dynamixel_servo[i], i + 1, DYNAMIXEL_XL430, &dynamixel_bus));
 
@@ -1352,6 +1592,7 @@ void PERIF_Dynamixel_Init() {
             LOG_ERROR("dynamixel_ping failed: %d", res);
             error_count += 1;
         }
+        vTaskDelay(pdMS_TO_TICKS(250));
     }
     if (error_count > 0) {
         LOG_ERROR("Failed to initialize %d servos", error_count);
@@ -1401,7 +1642,7 @@ void StartDefaultTask(void *argument)
     TickType_t t0, t1;
     int clock = 0;
 
-    xEventGroupSetBits(systemEventsHandle, EVT_CONTROLLER_READY);
+    // xEventGroupSetBits(systemEventsHandle, EVT_CONTROLLER_READY);
 
     /* Infinite loop */
     for (;;) {
@@ -1923,6 +2164,99 @@ void StartEkfTask(void *argument)
         }
     }
   /* USER CODE END StartEkfTask */
+}
+
+/* USER CODE BEGIN Header_StartUsartRxTask */
+/**
+* @brief Function implementing the usartRxTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartUsartRxTask */
+void StartUsartRxTask(void *argument)
+{
+  /* USER CODE BEGIN StartUsartRxTask */
+    assert(argument != NULL);
+    UART_HandleTypeDef *huart = (UART_HandleTypeDef *)argument;
+
+    // Enabl the IDLE interrupt, not standard in the HAL
+    __HAL_UART_ENABLE_IT(huart, UART_IT_IDLE);
+
+    HAL_HalfDuplex_EnableReceiver(huart);
+    if (HAL_UART_Receive_DMA(huart, dma_rx_buf, DMA_RX_BUF_SIZE) != HAL_OK) {
+        LOG_ERROR("[USARTRX] Failed to start receiver");
+        Error_Handler();
+    };
+
+    uint32_t notify;
+    /* Infinite loop */
+    for(;;)
+    {
+        xTaskNotifyWait(0, UINT32_MAX, &notify, portMAX_DELAY);
+
+        if (notify & (RX_DMA_HT | RX_DMA_TC | RX_DMA_IDLE)) {
+            uart_rx_drain_dma();
+        }
+    }
+  /* USER CODE END StartUsartRxTask */
+}
+
+/* USER CODE BEGIN Header_StartUsartTxTask */
+/**
+* @brief Function implementing the usartTxTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartUsartTxTask */
+void StartUsartTxTask(void *argument)
+{
+  /* USER CODE BEGIN StartUsartTxTask */
+    assert(argument != NULL);
+    UART_HandleTypeDef *huart = (UART_HandleTypeDef *)argument;
+
+    tx_msg_t msg;
+    uint32_t notify;
+    /* Infinite loop */
+    for(;;)
+    {
+        xQueueReceive(usart_tx_queueHandle, &msg, portMAX_DELAY);
+
+        // Stop DMA receive
+        if (HAL_UART_DMAStop(huart) != HAL_OK) {
+            LOG_ERROR("[USARTTX] Failed to stop receiver");
+        };
+
+        // Reset for next interation
+        dma_rx_read_idx = 0;
+        huart->hdmarx->Instance->NDTR = DMA_RX_BUF_SIZE;
+
+        // Enable Transmit
+        if (HAL_HalfDuplex_EnableTransmitter(huart) != HAL_OK) {
+            LOG_ERROR("[USARTTX] Failed to enable transmitter");
+        };
+
+        // Start the transfer
+        if (HAL_UART_Transmit_DMA(huart, msg.data, msg.len) != HAL_OK) {
+            LOG_ERROR("[USARTTX] Failed to start transfer");
+        };
+
+        // wait for a signal that the transfer is complete
+        xTaskNotifyWait(0, UINT32_MAX, &notify, portMAX_DELAY);
+
+        // Signal the write that transfer is complete
+        xSemaphoreGive(usart_tx_semHandle);
+
+        // Enable Receiver
+        if (HAL_HalfDuplex_EnableReceiver(huart) != HAL_OK) {
+            LOG_ERROR("[USARTTX] Failed to enable receiver");
+        };
+
+        // Start the receiver
+        if (HAL_UART_Receive_DMA(huart, dma_rx_buf, DMA_RX_BUF_SIZE) != HAL_OK) {
+            LOG_ERROR("[USARTTX] Failed to start receiver");
+        };
+    }
+  /* USER CODE END StartUsartTxTask */
 }
 
 /**
