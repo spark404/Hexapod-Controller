@@ -391,8 +391,8 @@ int main(void)
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_RESET);
 
-    // PERIF_BMI088_Init();
-    // PERIF_BMM350_Init();
+    PERIF_BMI088_Init();
+    PERIF_BMM350_Init();
     // PERIF_BNO055_Init();
 
     LOG_INFO("[Main] Initialisation complete");
@@ -519,7 +519,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLQ = 7;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
-    // Error_Handler();
+    //Error_Handler();
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
@@ -842,7 +842,7 @@ static void MX_USART6_UART_Init(void)
 
   /* USER CODE END USART6_Init 1 */
   huart6.Instance = USART6;
-  huart6.Init.BaudRate = 57600;
+  huart6.Init.BaudRate = 1000000;
   huart6.Init.WordLength = UART_WORDLENGTH_8B;
   huart6.Init.StopBits = UART_STOPBITS_1;
   huart6.Init.Parity = UART_PARITY_NONE;
@@ -933,7 +933,7 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-#define DEBUG_USART USART2
+#define DEBUG_USART USART1
 int __io_putchar(int ch) {
     while (!LL_USART_IsActiveFlag_TXE(DEBUG_USART)) {
     }
@@ -1134,7 +1134,6 @@ ssize_t usart_read(uint8_t *dst, const size_t len, const TickType_t timeout) {
     taskENTER_CRITICAL();
     size_t avail = ringbuf_available(&rx_ring);
     taskEXIT_CRITICAL();
-    LOG_DEBUG("[usart_read] %d bytes in ring", avail);
 
     size_t to_read = avail > len ? len : avail;
 
@@ -1145,14 +1144,12 @@ ssize_t usart_read(uint8_t *dst, const size_t len, const TickType_t timeout) {
     // Shortcut if everything was read from the ringbuffer
     if (count == len) {
         xSemaphoreGive(usartMutexHandle);
-        LOG_DEBUG("[usart_read] return %d bytes as requested", count);
         return (ssize_t)count;
     }
 
     /* Wait for first byte */
     if (xSemaphoreTake(usart_rx_semHandle, timeout) != pdTRUE) {
         xSemaphoreGive(usartMutexHandle);
-        LOG_DEBUG("[usart_read] return %d bytes at timeout", count);
         return (ssize_t)count;   // timeout, partial data
     }
 
@@ -1173,7 +1170,6 @@ ssize_t usart_read(uint8_t *dst, const size_t len, const TickType_t timeout) {
     }
 
     xSemaphoreGive(usartMutexHandle);
-    LOG_DEBUG("[usart_read] return %d bytes as requested after waiting", count);
     return (ssize_t)count;
 }
 
@@ -1208,7 +1204,6 @@ ssize_t usart_write(const uint8_t *src, const size_t len, const TickType_t timeo
     }
 
     xSemaphoreGive(usartMutexHandle);
-    LOG_DEBUG("[usart_write] wrote %d bytes as requested", len);
     return (ssize_t)len;
 }
 
@@ -1579,7 +1574,7 @@ void PERIF_Dynamixel_Init() {
     }
 
     DYNAMIXEL_ERROR_CHECK(
-        dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma_new, &dynamixel_write_uart_dma_new, &dynamixel_uart_context
+        dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma_new, &dynamixel_write_uart_dma_new, NULL, &dynamixel_uart_context
         ));
     int error_count = 0;
     for (int i = 0; i < 3 * 6; i++) {
@@ -1588,11 +1583,19 @@ void PERIF_Dynamixel_Init() {
         DYNAMIXEL_ERROR_CHECK(dynamixel_init(&dynamixel_servo[i], i + 1, DYNAMIXEL_XL430, &dynamixel_bus));
 
         const dynamixel_error_t res = dynamixel_ping(&dynamixel_servo[i]);
-        if (res != DYNAMIXEL_ERROR_NONE) {
+        if (res == STATUS_ALERT_FLAG) {
+            LOG_ERROR("Servo %d hardware alert", i);
+            uint8_t hardware_status;
+            if (dynamixel_get_byte_parameter(&dynamixel_servo[i], 70, &hardware_status) != STATUS_OK) {
+                LOG_ERROR("Servo %d failed to read hardware status", i);
+            } else {
+                LOG_ERROR("Servo %d hardware status: 0x%02x", i, hardware_status);
+            }
+            error_count++;
+        } else if (res != DYNAMIXEL_ERROR_NONE) {
             LOG_ERROR("dynamixel_ping failed: %d", res);
             error_count += 1;
         }
-        vTaskDelay(pdMS_TO_TICKS(250));
     }
     if (error_count > 0) {
         LOG_ERROR("Failed to initialize %d servos", error_count);
