@@ -329,6 +329,7 @@ void PERIF_BMI088_Init();
 void PERIF_BMM350_Init();
 void PERIF_BNO055_Init();
 void PERIF_Dynamixel_Init();
+void PERIF_Dynamixel_Configure();
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -519,7 +520,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLQ = 7;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
-    //Error_Handler();
+    Error_Handler();
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
@@ -1603,6 +1604,21 @@ void PERIF_Dynamixel_Init() {
     }
 }
 
+void PERIF_Dynamixel_Configure() {
+    for (int i = 0; i < 3 * 6; i++) {
+        dynamixel_set_led(&dynamixel_servo[i], 1);
+
+        // Check and configure Return Delay Time
+        uint8_t rdt;
+        dynamixel_get_byte_parameter(&dynamixel_servo[i], 9, &rdt);
+        if (rdt != 5) {
+            dynamixel_set_byte_parameter(&dynamixel_servo[i], 9, 5);
+        }
+
+        dynamixel_set_led(&dynamixel_servo[i], 0);
+    }
+}
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -1618,6 +1634,7 @@ void StartDefaultTask(void *argument)
     (void) argument;
 
     PERIF_Dynamixel_Init();
+    PERIF_Dynamixel_Configure();
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
@@ -1645,7 +1662,7 @@ void StartDefaultTask(void *argument)
     TickType_t t0, t1;
     int clock = 0;
 
-    // xEventGroupSetBits(systemEventsHandle, EVT_CONTROLLER_READY);
+    xEventGroupSetBits(systemEventsHandle, EVT_CONTROLLER_READY);
 
     /* Infinite loop */
     for (;;) {
@@ -2238,6 +2255,9 @@ void StartUsartTxTask(void *argument)
             LOG_ERROR("[USARTTX] Failed to enable transmitter");
         };
 
+        // Just to be sure
+        __HAL_UART_CLEAR_FLAG(huart, UART_FLAG_TC);
+
         // Start the transfer
         if (HAL_UART_Transmit_DMA(huart, msg.data, msg.len) != HAL_OK) {
             LOG_ERROR("[USARTTX] Failed to start transfer");
@@ -2246,8 +2266,10 @@ void StartUsartTxTask(void *argument)
         // wait for a signal that the transfer is complete
         xTaskNotifyWait(0, UINT32_MAX, &notify, portMAX_DELAY);
 
-        // Signal the write that transfer is complete
-        xSemaphoreGive(usart_tx_semHandle);
+        // VERY IMPORTANT: wait until line is physically idle
+        while (__HAL_UART_GET_FLAG(huart, UART_FLAG_TC) == RESET) {
+            /* spin very briefly */
+        }
 
         // Enable Receiver
         if (HAL_HalfDuplex_EnableReceiver(huart) != HAL_OK) {
@@ -2258,6 +2280,9 @@ void StartUsartTxTask(void *argument)
         if (HAL_UART_Receive_DMA(huart, dma_rx_buf, DMA_RX_BUF_SIZE) != HAL_OK) {
             LOG_ERROR("[USARTTX] Failed to start receiver");
         };
+
+        // Signal the write that transfer is complete
+        xSemaphoreGive(usart_tx_semHandle);
     }
   /* USER CODE END StartUsartTxTask */
 }
