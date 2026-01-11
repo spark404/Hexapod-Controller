@@ -44,7 +44,6 @@
 
 #include "hexapodmath/additional_functions.h"
 
-
 #include "robot.h"
 #include "calculator.h"
 #include "servos.h"
@@ -52,6 +51,7 @@
 #include "semphr.h"
 #include "dynamixel/protocol.h"
 #include "controller.h"
+#include "error_handling.h"
 #include "event_groups.h"
 #include "rgb_led.h"
 #include "measure.h"
@@ -1120,7 +1120,7 @@ void stm32_bno055_delay_us(u32 period) {
     while (__HAL_TIM_GET_COUNTER(&htim1) < period); // wait for the counter to reach the us input in the parameter
 }
 
-ssize_t usart_read(uint8_t *dst, const size_t len, const TickType_t timeout) {
+ssize_t usart_read(uint8_t *dst, const size_t len, const uint32_t timeout) {
     size_t count = 0;
 
     if (len == 0) {
@@ -1128,7 +1128,7 @@ ssize_t usart_read(uint8_t *dst, const size_t len, const TickType_t timeout) {
     }
 
     /* Ensure only one reader */
-    if (xSemaphoreTake(usartMutexHandle, timeout) != pdTRUE) {
+    if (osMutexAcquire(usartMutexHandle, timeout) != osOK) {
         return -1;
     }
 
@@ -1144,13 +1144,13 @@ ssize_t usart_read(uint8_t *dst, const size_t len, const TickType_t timeout) {
 
     // Shortcut if everything was read from the ringbuffer
     if (count == len) {
-        xSemaphoreGive(usartMutexHandle);
+        osMutexRelease(usartMutexHandle);
         return (ssize_t)count;
     }
 
     /* Wait for first byte */
-    if (xSemaphoreTake(usart_rx_semHandle, timeout) != pdTRUE) {
-        xSemaphoreGive(usartMutexHandle);
+    if (osSemaphoreAcquire(usart_rx_semHandle, timeout) != osOK) {
+        osMutexRelease(usartMutexHandle);
         return (ssize_t)count;   // timeout, partial data
     }
 
@@ -1161,7 +1161,7 @@ ssize_t usart_read(uint8_t *dst, const size_t len, const TickType_t timeout) {
 
     /* Drain remaining bytes without blocking */
     while (count < len) {
-        if (xSemaphoreTake(usart_rx_semHandle, 0) != pdTRUE) {
+        if (osSemaphoreAcquire(usart_rx_semHandle, 0) != osOK) {
             break;
         }
 
@@ -1170,17 +1170,17 @@ ssize_t usart_read(uint8_t *dst, const size_t len, const TickType_t timeout) {
         taskEXIT_CRITICAL();
     }
 
-    xSemaphoreGive(usartMutexHandle);
+    osMutexRelease(usartMutexHandle);
     return (ssize_t)count;
 }
 
-ssize_t usart_write(const uint8_t *src, const size_t len, const TickType_t timeout) {
+ssize_t usart_write(const uint8_t *src, const size_t len, const uint32_t timeout) {
     if (len == 0) {
         return 0;
     }
 
     /* Exclusive access */
-    if (xSemaphoreTake(usartMutexHandle, timeout) != pdTRUE) {
+    if (osMutexAcquire(usartMutexHandle, timeout) != osOK) {
         return -1;
     }
 
@@ -1191,20 +1191,20 @@ ssize_t usart_write(const uint8_t *src, const size_t len, const TickType_t timeo
     };
 
     /* Clear completion semaphore */
-    xSemaphoreTake(usart_tx_semHandle, 0);
+    osSemaphoreAcquire(usart_tx_semHandle, 0);
 
-    if (xQueueSend(usart_tx_queueHandle, &msg, timeout) != pdTRUE) {
-        xSemaphoreGive(usartMutexHandle);
+    if (osMessageQueuePut(usart_tx_queueHandle, &msg, 0, timeout) != osOK) {
+        osMutexRelease(usartMutexHandle);
         return -1;
     }
 
     /* Wait for TX complete */
-    if (xSemaphoreTake(usart_tx_semHandle, timeout) != pdTRUE) {
-        xSemaphoreGive(usartMutexHandle);
+    if (osSemaphoreAcquire(usart_tx_semHandle, timeout) != osOK) {
+        osMutexRelease(usartMutexHandle);
         return -1;
     }
 
-    xSemaphoreGive(usartMutexHandle);
+    osMutexRelease(usartMutexHandle);
     return (ssize_t)len;
 }
 
@@ -1213,10 +1213,8 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
         return;
     }
 
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-    xTaskNotifyFromISR(usartTxTaskHandle, TX_DMA_TC, eSetBits, &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    // osThreadFlagsSet internally handles context switching from ISR
+    osThreadFlagsSet(usartTxTaskHandle, TX_DMA_TC);
 }
 
 
@@ -1225,10 +1223,8 @@ void HAL_UART_RxHalfCpltCallback(UART_HandleTypeDef *huart) {
         return;
     }
 
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-    xTaskNotifyFromISR(usartRxTaskHandle, RX_DMA_HT, eSetBits, &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    // osThreadFlagsSet internally handles context switching from ISR
+    osThreadFlagsSet(usartRxTaskHandle, RX_DMA_HT);
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
@@ -1236,17 +1232,15 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
         return;
     }
 
-    uint32_t notify = RX_DMA_TC;
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
+    uint32_t notify;
     if (__HAL_UART_GET_FLAG(huart, UART_FLAG_IDLE)) {
         notify = RX_DMA_IDLE;
     } else {
         notify = RX_DMA_TC;
     }
 
-    xTaskNotifyFromISR(usartRxTaskHandle, notify, eSetBits, &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    // osThreadFlagsSet internally handles context switching from ISR
+    osThreadFlagsSet(usartRxTaskHandle, notify);
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
@@ -1254,10 +1248,8 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
         return;
     }
 
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-
-    xTaskNotifyFromISR(usartRxTaskHandle, RX_DMA_ERROR, eSetBits, &xHigherPriorityTaskWoken);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+    // osThreadFlagsSet internally handles context switching from ISR
+    osThreadFlagsSet(usartRxTaskHandle, RX_DMA_ERROR);
 }
 
 // Callback called by HAL when SPI receive complete (in ISR context)
@@ -1266,9 +1258,8 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi) {
         return;
     }
 
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    // osThreadFlagsSet internally handles context switching from ISR
     osThreadFlagsSet(spiSlaveTaskHandle, SPI1_RX_CPLT);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi) {
@@ -1276,9 +1267,8 @@ void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi) {
         return;
     }
 
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    // osThreadFlagsSet internally handles context switching from ISR
     osThreadFlagsSet(spiSlaveTaskHandle, SPI1_ERROR);
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
@@ -1289,18 +1279,16 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
             if (!gyro_interrupt_enable) {
                 break;
             }
-            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-            vTaskNotifyGiveFromISR(gyroTaskHandle, &xHigherPriorityTaskWoken);
-            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+            // osThreadFlagsSet internally handles context switching from ISR
+            osThreadFlagsSet(gyroTaskHandle, 0x01);
             break;
         }
         case SPI2_INT_ACC_Pin: {
             if (!accel_interrupt_enable) {
                 break;
             }
-            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-            vTaskNotifyGiveFromISR(accelTaskHandle, &xHigherPriorityTaskWoken);
-            portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+            // osThreadFlagsSet internally handles context switching from ISR
+            osThreadFlagsSet(accelTaskHandle, 0x01);
             break;
         }
         default:
@@ -1636,7 +1624,7 @@ void StartDefaultTask(void *argument)
     PERIF_Dynamixel_Init();
     PERIF_Dynamixel_Configure();
 
-    TickType_t xLastWakeTime = xTaskGetTickCount();
+    uint32_t tick_count = osKernelGetTickCount();
 
     controller_ctx_t controller_ctx;
     controller_command_t cmd = {
@@ -1659,10 +1647,10 @@ void StartDefaultTask(void *argument)
     running_avg_init(&servo_write_ticks);
     running_avg_init(&controller_update_ticks);
 
-    TickType_t t0, t1;
+    uint32_t t0, t1;
     int clock = 0;
 
-    xEventGroupSetBits(systemEventsHandle, EVT_CONTROLLER_READY);
+    osEventFlagsSet(systemEventsHandle, EVT_CONTROLLER_READY);
 
     /* Infinite loop */
     for (;;) {
@@ -1672,7 +1660,7 @@ void StartDefaultTask(void *argument)
         cmd.heading = updated_heading;
         cmd.height = updated_height;
 
-        t0 = xTaskGetTickCount();
+        t0 = osKernelGetTickCount();
         // Determine the actual servo positions
         for (int i = 0; i < 6; i++) {
             struct leg_state *current_leg_state = &controller_ctx.robot.leg_state[i];
@@ -1715,15 +1703,15 @@ void StartDefaultTask(void *argument)
                 current_leg_state->actual_joint_angles[2] = compensated_angles[2] * (1 - alpha) + alpha * current_leg_state->next_joint_angles[2];
             }
         }
-        t1 = xTaskGetTickCount();
+        t1 = osKernelGetTickCount();
         running_avg_add(&servo_read_ticks, t1-t0);
 
-        t0 = xTaskGetTickCount();
+        t0 = osKernelGetTickCount();
         controller_update(&controller_ctx, &attitude, &cmd, MAIN_LOOP_INTERVAL / 1000);
-        t1 = xTaskGetTickCount();
+        t1 = osKernelGetTickCount();
         running_avg_add(&controller_update_ticks, t1-t0);
 
-        t0 = xTaskGetTickCount();
+        t0 = osKernelGetTickCount();
         // Write next values to the servos
         if (controller_ctx.state != CTRL_POWERDOWN) {
             for (int i = 0; i < 6; i++) {
@@ -1760,7 +1748,7 @@ void StartDefaultTask(void *argument)
                 write_next_servo_position(leg_servos, 3, leg_servo_angles);
             }
         }
-        t1 = xTaskGetTickCount();
+        t1 = osKernelGetTickCount();
         running_avg_add(&servo_write_ticks, t1-t0);
 
         // FIXME clock is a horrible way to print data periodically, do better.
@@ -1784,7 +1772,8 @@ void StartDefaultTask(void *argument)
         }
 
         // Schedule at fixed 5 Hz
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(MAIN_LOOP_INTERVAL));
+        tick_count += MAIN_LOOP_INTERVAL;
+        osDelayUntil(tick_count);
     }
   /* USER CODE END 5 */
 }
@@ -1823,7 +1812,8 @@ void StartSpiSlaveTask(void *argument)
         if (HAL_SPI_Receive_IT(&hspi1, buffer, 7) != HAL_OK) {
             LOG_ERROR("[StartSpiSlaveTask] HAL_SPI_Receive error");
 
-            // Wait, reset and try again
+            // Abort and reset SPI peripheral state
+            HAL_SPI_Abort(&hspi1);
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
@@ -1831,17 +1821,20 @@ void StartSpiSlaveTask(void *argument)
         const uint32_t flags = osThreadFlagsWait(SPI1_RX_CPLT | SPI1_ERROR, osFlagsWaitAny, portMAX_DELAY);
         if (flags == (uint32_t) osErrorTimeout) {
             LOG_DEBUG("[StartSpiSlaveTask] osThreadFlagsWait timeout");
+            HAL_SPI_Abort(&hspi1);
             continue;
         }
 
         if (flags & (1U << 31)) {
             LOG_DEBUG("[StartSpiSlaveTask] osThreadFlagsWait error %ld", flags);
+            HAL_SPI_Abort(&hspi1);
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
 
-        if (flags == SPI1_ERROR) {
+        if (flags & SPI1_ERROR) {
             LOG_DEBUG("[StartSpiSlaveTask] receive error");
+            HAL_SPI_Abort(&hspi1);
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
@@ -1849,6 +1842,8 @@ void StartSpiSlaveTask(void *argument)
         // Check the magic header
         if (buffer[0] != 0xA5) {
             LOG_ERROR("[StartSpiSlaveTask] Invalid magic header: 0x%02x", buffer[0]);
+            // Reset SPI state to resync with master
+            HAL_SPI_Abort(&hspi1);
             continue;
         }
 
@@ -1856,37 +1851,43 @@ void StartSpiSlaveTask(void *argument)
         switch (buffer[2]) {
             case 0x01: {
                 // Command set speed
-                const float32_t *new_velocity = (float32_t *) &buffer[3];
-                if (*new_velocity < 0 || *new_velocity > 100) {
-                    LOG_WARN("[StartSpiSlaveTask] Ignoring new velocity %5.2f", *new_velocity);
+                // Use memcpy to avoid alignment issues
+                float32_t new_velocity;
+                memcpy(&new_velocity, &buffer[3], sizeof(float32_t));
+                if (new_velocity < 0 || new_velocity > 100) {
+                    LOG_WARN("[StartSpiSlaveTask] Ignoring new velocity %5.2f", new_velocity);
                     break;
                 }
-                LOG_INFO("[StartSpiSlaveTask] Set speed to %5.2f mm/s", *new_velocity);
-                updated_velocity = *new_velocity;
+                LOG_INFO("[StartSpiSlaveTask] Set speed to %5.2f mm/s", new_velocity);
+                updated_velocity = new_velocity;
                 break;
             }
 
             case 0x02: {
                 // Command set heading
-                const float32_t *new_heading = (float32_t *) &buffer[3];
-                if (*new_heading < 0 || *new_heading > M_PI) {
-                    LOG_WARN("[StartSpiSlaveTask] Ignoring new heading %5.3f rad", *new_heading);
+                // Use memcpy to avoid alignment issues
+                float32_t new_heading;
+                memcpy(&new_heading, &buffer[3], sizeof(float32_t));
+                if (new_heading < 0 || new_heading > (2.0f * M_PI)) {
+                    LOG_WARN("[StartSpiSlaveTask] Ignoring new heading %5.3f rad", new_heading);
                     break;
                 }
-                LOG_INFO("[StartSpiSlaveTask] Set heading to %5.3f rad", *new_heading);
-                updated_heading = *new_heading;
+                LOG_INFO("[StartSpiSlaveTask] Set heading to %5.3f rad", new_heading);
+                updated_heading = new_heading;
                 break;
             }
 
             case 0x03: {
                 // Command set height
-                const float32_t *new_height = (float32_t *) &buffer[3];
-                if (*new_height < 50 || *new_height > 170) {
-                    LOG_WARN("[StartSpiSlaveTask] Ignoring new body height %5.2f", *new_height);
+                // Use memcpy to avoid alignment issues
+                float32_t new_height;
+                memcpy(&new_height, &buffer[3], sizeof(float32_t));
+                if (new_height < 50 || new_height > 170) {
+                    LOG_WARN("[StartSpiSlaveTask] Ignoring new body height %5.2f", new_height);
                     break;
                 }
-                LOG_INFO("[StartSpiSlaveTask] Set new body height to %5.2f mm", *new_height);
-                updated_height = *new_height;
+                LOG_INFO("[StartSpiSlaveTask] Set new body height to %5.2f mm", new_height);
+                updated_height = new_height;
                 break;
             }
 
@@ -1943,10 +1944,10 @@ void StartGyroTask(void *argument)
   /* Infinite loop */
     for (;;) {
         // Wait for interrupt
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        osThreadFlagsWait(0x01, osFlagsWaitAny, osWaitForever);
 
         // Only one task can use SPI at a time
-        if (xSemaphoreTake(spiMutexHandle, (TickType_t) 1) != pdTRUE) {
+        if (osMutexAcquire(spiMutexHandle, 1) != osOK) {
             continue;
         }
 
@@ -1956,7 +1957,7 @@ void StartGyroTask(void *argument)
             continue;
         }
 
-        xSemaphoreGive(spiMutexHandle);
+        osMutexRelease(spiMutexHandle);
 
         // Scale and convert to rad/s
         sensor_frame_data[0] = stm32_bmi08g_scale_data(gyro.x, range) * (float32_t)(M_PI / 180.0f);
@@ -1965,10 +1966,10 @@ void StartGyroTask(void *argument)
         stm32_bmi08g_sensor_to_ned(sensor_frame_data, sample.data);
 
         sample.type = SENSOR_GYRO;
-        sample.tick = xTaskGetTickCount();
+        sample.tick = osKernelGetTickCount();
 
         // Non-blocking send (gyro is high rate)
-        xQueueSendToBack(ekf_queueHandle, &sample, 0);
+        osMessageQueuePut(ekf_queueHandle, &sample, 0, 0);
     }
   /* USER CODE END StartGyroTask */
 }
@@ -2021,10 +2022,10 @@ void StartAccelTask(void *argument)
     /* Infinite loop */
     for (;;) {
         // Wait for interrupt
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        osThreadFlagsWait(0x01, osFlagsWaitAny, osWaitForever);
 
         // Only one task can use SPI at a time
-        if (xSemaphoreTake(spiMutexHandle, (TickType_t) 5) != pdTRUE) {
+        if (osMutexAcquire(spiMutexHandle, 5) != osOK) {
             continue;
         }
 
@@ -2034,7 +2035,7 @@ void StartAccelTask(void *argument)
             continue;
         }
 
-        xSemaphoreGive(spiMutexHandle);
+        osMutexRelease(spiMutexHandle);
 
         // Scale and convert to m/s2
         sensor_frame_data[0] = stm32_bmi08a_scale_data(accel.x, range) * GRAVITY / 1000;
@@ -2043,10 +2044,10 @@ void StartAccelTask(void *argument)
         stm32_bmi08a_sensor_to_ned(sensor_frame_data, sample.data);
 
         sample.type = SENSOR_ACCEL;
-        sample.tick = xTaskGetTickCount();
+        sample.tick = osKernelGetTickCount();
 
         // Blocking send (accel is not that high rate)
-        xQueueSendToBack(ekf_queueHandle, &sample, 5);
+        osMessageQueuePut(ekf_queueHandle, &sample, 0, 5);
     }
   /* USER CODE END StartAccelTask */
 }
@@ -2064,17 +2065,16 @@ void StartMagTask(void *argument)
     UNUSED(argument);
 
     // Wait for the EKF to become ready
-    xEventGroupWaitBits(systemEventsHandle,
+    osEventFlagsWait(systemEventsHandle,
                 EVT_EKF_READY,
-                pdFALSE,
-                pdTRUE,
-                portMAX_DELAY);
+                osFlagsWaitAll,
+                osWaitForever);
 
     sensor_sample_t sample;
     struct bmm350_mag_temp_data data;
     float32_t sensor_frame_data[3];
 
-    TickType_t xLastWakeTime = xTaskGetTickCount();
+    uint32_t tick_count = osKernelGetTickCount();
 
     float32_t bias[3] = { +37, -24, +35 };
 
@@ -2099,11 +2099,12 @@ void StartMagTask(void *argument)
             sample.type = SENSOR_MAG;
 
             // Blocking send (mag is not low rate)
-            xQueueSendToBack(ekf_queueHandle, &sample, 10);
+            osMessageQueuePut(ekf_queueHandle, &sample, 0, 10);
         }
 
         // Schedule at 5 Hz
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000 / 5));
+        tick_count += (1000 / 5);
+        osDelayUntil(tick_count);
     }
   /* USER CODE END StartMagTask */
 }
@@ -2122,22 +2123,21 @@ void StartEkfTask(void *argument)
 
     attitude_ekf_t ekf;
     sensor_sample_t sample;
-    TickType_t last_gyro_tick = 0;
+    uint32_t last_gyro_tick = 0;
 
     attitude_ekf_init(&ekf);
 
     // Wait for the controller to become ready
-    xEventGroupWaitBits(systemEventsHandle,
+    osEventFlagsWait(systemEventsHandle,
                 EVT_CONTROLLER_READY,
-                pdFALSE,
-                pdTRUE,
-                portMAX_DELAY);
+                osFlagsWaitAll,
+                osWaitForever);
 
     // Signal ready
-    xEventGroupSetBits(systemEventsHandle, EVT_EKF_READY);
+    osEventFlagsSet(systemEventsHandle, EVT_EKF_READY);
 
     for (;;) {
-        if (xQueueReceive(ekf_queueHandle, &sample, portMAX_DELAY)) {
+        if (osMessageQueueGet(ekf_queueHandle, &sample, NULL, osWaitForever) == osOK) {
 
             if (sample.type == SENSOR_GYRO) {
                 float32_t dt = (sample.tick - last_gyro_tick) * portTICK_PERIOD_MS * 0.001f;
@@ -2208,13 +2208,13 @@ void StartUsartRxTask(void *argument)
         Error_Handler();
     };
 
-    uint32_t notify;
+    uint32_t flags;
     /* Infinite loop */
     for(;;)
     {
-        xTaskNotifyWait(0, UINT32_MAX, &notify, portMAX_DELAY);
+        flags = osThreadFlagsWait(RX_DMA_HT | RX_DMA_TC | RX_DMA_IDLE | RX_DMA_ERROR, osFlagsWaitAny, osWaitForever);
 
-        if (notify & (RX_DMA_HT | RX_DMA_TC | RX_DMA_IDLE)) {
+        if (flags & (RX_DMA_HT | RX_DMA_TC | RX_DMA_IDLE)) {
             uart_rx_drain_dma();
         }
     }
@@ -2235,11 +2235,10 @@ void StartUsartTxTask(void *argument)
     UART_HandleTypeDef *huart = (UART_HandleTypeDef *)argument;
 
     tx_msg_t msg;
-    uint32_t notify;
-    /* Infinite loop */
+  /* Infinite loop */
     for(;;)
     {
-        xQueueReceive(usart_tx_queueHandle, &msg, portMAX_DELAY);
+        osMessageQueueGet(usart_tx_queueHandle, &msg, NULL, osWaitForever);
 
         // Stop DMA receive
         if (HAL_UART_DMAStop(huart) != HAL_OK) {
@@ -2264,7 +2263,7 @@ void StartUsartTxTask(void *argument)
         };
 
         // wait for a signal that the transfer is complete
-        xTaskNotifyWait(0, UINT32_MAX, &notify, portMAX_DELAY);
+        osThreadFlagsWait(TX_DMA_TC, osFlagsWaitAny, osWaitForever);
 
         // VERY IMPORTANT: wait until line is physically idle
         while (__HAL_UART_GET_FLAG(huart, UART_FLAG_TC) == RESET) {
@@ -2282,7 +2281,7 @@ void StartUsartTxTask(void *argument)
         };
 
         // Signal the write that transfer is complete
-        xSemaphoreGive(usart_tx_semHandle);
+        osSemaphoreRelease(usart_tx_semHandle);
     }
   /* USER CODE END StartUsartTxTask */
 }
@@ -2324,7 +2323,15 @@ void Error_Handler(void)
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_SET);
 
-    while (1) {
+    printf("\n\n=== FATAL ERROR ===\n");
+    printf("Thread: %s\n", osThreadGetName(osThreadGetId()));
+
+    error_print_backtrace();
+
+    printf("System halted.\n");
+
+    for (;;) {
+        __BKPT(0);   // Optional: break into debugger
     }
   /* USER CODE END Error_Handler_Debug */
 }

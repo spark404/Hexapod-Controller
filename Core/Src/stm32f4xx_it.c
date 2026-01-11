@@ -96,6 +96,16 @@ void HardFault_Handler(void)
 	  HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
 	  HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_SET);
 
+    __asm volatile (
+      "tst lr, #4        \n"
+      "ite eq            \n"
+      "mrseq r0, msp     \n"
+      "mrsne r0, psp     \n"
+      "b hardfault_c     \n"
+    );
+
+    // Code below is unreachable
+
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
