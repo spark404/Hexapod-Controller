@@ -190,7 +190,7 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
 
     // Rules for transitions
     if (ctx->state == CTRL_BOOT) {
-        ctx->next_state = CTRL_SYNCING;
+        ctx->next_state = CTRL_STANDUP;
     }
 
     if (ctx->state == CTRL_STANDING) {
@@ -204,7 +204,7 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
     }
 
     if (ctx->state == CTRL_POWERDOWN && (wants_translation || wants_rotation)) {
-        ctx->next_state = CTRL_SYNCING;
+        ctx->next_state = CTRL_STANDUP;
     }
 
     if (ctx->state == CTRL_STANDING) {
@@ -243,14 +243,7 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
         }
     }
 
-    if (ctx->state == CTRL_SYNCING) {
-        // Make sure actual and next angles are set to the same value
-        for (int i = 0; i < 6; i++) {
-            arm_vec_copy_f32(ctx->robot.leg_state[i].actual_joint_angles,
-                             ctx->robot.leg_state[i].next_joint_angles, 3);
-        }
-        ctx->next_state = CTRL_STANDUP;
-    } else if (ctx->state == CTRL_STANDUP) {
+    if (ctx->state == CTRL_STANDUP) {
         int ready = 1;
         motion_param_t motion_param = {CTRL_DEFAULT_VEL, CTRL_LIFT_VEL, CTRL_LIFT_Z};
         // Perform the standup routine, follows on SYNCING
@@ -652,7 +645,6 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
 const char *controller_state_to_string(controller_state_t state) {
     switch (state) {
         case CTRL_BOOT: return "BOOT";
-        case CTRL_SYNCING: return "SYNCING";
         case CTRL_STANDUP: return "STANDUP";
         case CTRL_STANDING: return "STANDING";
         case CTRL_WALKING: return "WALKING";

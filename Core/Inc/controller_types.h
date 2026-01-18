@@ -12,7 +12,6 @@
 
 typedef enum {
     CTRL_BOOT,
-    CTRL_SYNCING,
     CTRL_STANDUP,
     CTRL_STANDING,
     CTRL_WALKING,

@@ -51,10 +51,12 @@
 #include "semphr.h"
 #include "dynamixel/protocol.h"
 #include "controller.h"
+#include "controller_math.h"
 #include "error_handling.h"
 #include "event_groups.h"
 #include "rgb_led.h"
 #include "measure.h"
+#include "robot_config.h"
 #include "sensors.h"
 
 /* USER CODE END Includes */
@@ -87,6 +89,7 @@ typedef struct {
     uint16_t len;
 } tx_msg_t;
 
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -107,7 +110,11 @@ arm_mat_init_f32(&M, S, S, p ## M ## Data)
 #define MATRIX4(M) \
 MATRIX(M, 4)
 
-#define MAIN_LOOP_INTERVAL 200.0f // ms
+#define HZ_TO_INTERVAL(hz) (1000 / (uint32_t)(hz))
+#define MAIN_LOOP_INTERVAL HZ_TO_INTERVAL(1)
+#define CONTROL_LOOP_INTERVAL HZ_TO_INTERVAL(100)
+#define SERVO_LOOP_INTERVAL HZ_TO_INTERVAL(200)
+#define MAG_LOOP_INTERVAL HZ_TO_INTERVAL(5)
 
 #define DMA_RX_BUF_SIZE 1024 // Can handle 2.5ms of data at 4Mbps
 #define RX_RING_SIZE 4096    // Enough space to handle driver delay
@@ -117,6 +124,14 @@ MATRIX(M, 4)
 #define RX_DMA_IDLE 0x4
 #define RX_DMA_ERROR 0x8
 #define TX_DMA_TC 0x01
+
+#define SERVO_MAX_VELOCITY 4.0f
+#define SERVO_DEADBAND_RAD 0.004f   // ≈ 0.23°
+#define SERVO_MIN_STEP_RAD 0.006f   // ≈ 0.34°
+#define SERVO_MAX_ACCELERATION  30.0f   // rad/s²
+
+// Blend rate for merging actual measurements into state
+#define ALPHA 0.1f
 
 /* USER CODE END PD */
 
@@ -152,7 +167,7 @@ const osThreadAttr_t defaultTask_attributes = {
 osThreadId_t spiSlaveTaskHandle;
 const osThreadAttr_t spiSlaveTask_attributes = {
   .name = "spiSlaveTask",
-  .stack_size = 2048 * 4,
+  .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for gyroTask */
@@ -195,6 +210,20 @@ osThreadId_t usartTxTaskHandle;
 const osThreadAttr_t usartTxTask_attributes = {
   .name = "usartTxTask",
   .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for controlTask */
+osThreadId_t controlTaskHandle;
+const osThreadAttr_t controlTask_attributes = {
+  .name = "controlTask",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for servoTask */
+osThreadId_t servoTaskHandle;
+const osThreadAttr_t servoTask_attributes = {
+  .name = "servoTask",
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for ekf_queue */
@@ -245,7 +274,7 @@ bno055_tt bno055;
 
 dynamixel_ll_uart_context dynamixel_uart_context;
 dynamixel_bus_t dynamixel_bus;
-dynamixel_servo_t dynamixel_servo[3 * 6];
+dynamixel_servo_t dynamixel_servos[3 * 6];
 
 volatile osThreadId_t servoCallbackThreadId;
 
@@ -273,6 +302,8 @@ static uint8_t rx_ring_buffer[RX_RING_SIZE];
 static ringbuf_t rx_ring;
 static size_t dma_rx_read_idx = 0;
 
+servo_shared_state_t servo_shared_state;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -296,6 +327,8 @@ void StartMagTask(void *argument);
 void StartEkfTask(void *argument);
 void StartUsartRxTask(void *argument);
 void StartUsartTxTask(void *argument);
+void StartControlTask(void *argument);
+void StartServoTask(void *argument);
 
 /* USER CODE BEGIN PFP */
 int __io_putchar(int ch);
@@ -465,6 +498,12 @@ int main(void)
 
   /* creation of usartTxTask */
   usartTxTaskHandle = osThreadNew(StartUsartTxTask, (void*) &huart6, &usartTxTask_attributes);
+
+  /* creation of controlTask */
+  controlTaskHandle = osThreadNew(StartControlTask, NULL, &controlTask_attributes);
+
+  /* creation of servoTask */
+  servoTaskHandle = osThreadNew(StartServoTask, NULL, &servoTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
     rgb_led_init();
@@ -1304,26 +1343,20 @@ static void stm32_state_change_cb(
 ) {
     (void)ctx;
     (void)user_data;
-    (void)from;
+
+    switch (from) {
+        case CTRL_POWERDOWN:
+            servo_shared_state.request_powerdown = false;
+            break;
+        default:
+            break;
+    }
 
     switch (to) {
-        case CTRL_SYNCING:
-            rgb_led_set_color(RGB_LED_COLOR_RED);
-            rgb_led_blink(500, 0.5f);
-            LOG_INFO("Activating torque on servos");
-            for (int i = 0; i < 3 * 6; i++) {
-                dynamixel_set_torque_enable(&dynamixel_servo[i], 1);
-                dynamixel_set_led(&dynamixel_servo[i], 1);
-            }
-            break;
         case CTRL_POWERDOWN:
             rgb_led_set_color(RGB_LED_COLOR_MAGENTA);
             rgb_led_blink(500, 0.5f);
-            LOG_INFO("Deactivating torque on servos");
-            for (int i = 0; i < 3 * 6; i++) {
-                dynamixel_set_torque_enable(&dynamixel_servo[i], 0);
-                dynamixel_set_led(&dynamixel_servo[i], 0);
-            }
+            servo_shared_state.request_powerdown = true;
             break;
         case CTRL_STANDUP:
             rgb_led_set_color(RGB_LED_COLOR_CYAN);
@@ -1335,6 +1368,10 @@ static void stm32_state_change_cb(
             break;
         case CTRL_WALKING:
             rgb_led_set_color(RGB_LED_COLOR_BLUE);
+            rgb_led_blink(500, 0.5f);
+            break;
+        case CTRL_ROTATING:
+            rgb_led_set_color(RGB_LED_COLOR_YELLOW);
             rgb_led_blink(500, 0.5f);
             break;
         default:
@@ -1566,24 +1603,27 @@ void PERIF_Dynamixel_Init() {
         dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma_new, &dynamixel_write_uart_dma_new, NULL, &dynamixel_uart_context
         ));
     int error_count = 0;
-    for (int i = 0; i < 3 * 6; i++) {
-        LOG_INFO("Checking Servo %d...", i);
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < 3; j++) {
+            const uint8_t id = r.leg[i].servos[j];
+            LOG_INFO("Checking Servo %d, leg %d, joint %d...", id, i, j);
 
-        DYNAMIXEL_ERROR_CHECK(dynamixel_init(&dynamixel_servo[i], i + 1, DYNAMIXEL_XL430, &dynamixel_bus));
+            DYNAMIXEL_ERROR_CHECK(dynamixel_init(&dynamixel_servos[i], id, DYNAMIXEL_XL430, &dynamixel_bus));
 
-        const dynamixel_error_t res = dynamixel_ping(&dynamixel_servo[i]);
-        if (res == STATUS_ALERT_FLAG) {
-            LOG_ERROR("Servo %d hardware alert", i);
-            uint8_t hardware_status;
-            if (dynamixel_get_byte_parameter(&dynamixel_servo[i], 70, &hardware_status) != STATUS_OK) {
-                LOG_ERROR("Servo %d failed to read hardware status", i);
-            } else {
-                LOG_ERROR("Servo %d hardware status: 0x%02x", i, hardware_status);
+            const dynamixel_error_t res = dynamixel_ping(&dynamixel_servos[i]);
+            if (res == STATUS_ALERT_FLAG) {
+                LOG_ERROR("Servo %d hardware alert", i);
+                uint8_t hardware_status;
+                if (dynamixel_get_byte_parameter(&dynamixel_servos[i], 70, &hardware_status) != STATUS_OK) {
+                    LOG_ERROR("Servo %d failed to read hardware status", i);
+                } else {
+                    LOG_ERROR("Servo %d hardware status: 0x%02x", i, hardware_status);
+                }
+                error_count++;
+            } else if (res != DYNAMIXEL_ERROR_NONE) {
+                LOG_ERROR("dynamixel_ping failed: %d", res);
+                error_count += 1;
             }
-            error_count++;
-        } else if (res != DYNAMIXEL_ERROR_NONE) {
-            LOG_ERROR("dynamixel_ping failed: %d", res);
-            error_count += 1;
         }
     }
     if (error_count > 0) {
@@ -1594,16 +1634,16 @@ void PERIF_Dynamixel_Init() {
 
 void PERIF_Dynamixel_Configure() {
     for (int i = 0; i < 3 * 6; i++) {
-        dynamixel_set_led(&dynamixel_servo[i], 1);
+        dynamixel_set_led(&dynamixel_servos[i], 1);
 
         // Check and configure Return Delay Time
         uint8_t rdt;
-        dynamixel_get_byte_parameter(&dynamixel_servo[i], 9, &rdt);
+        dynamixel_get_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_RETURN_DELAY_TIME, &rdt);
         if (rdt != 5) {
-            dynamixel_set_byte_parameter(&dynamixel_servo[i], 9, 5);
+            dynamixel_set_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_RETURN_DELAY_TIME, 5);
         }
 
-        dynamixel_set_led(&dynamixel_servo[i], 0);
+        dynamixel_set_led(&dynamixel_servos[i], 0);
     }
 }
 
@@ -1621,135 +1661,19 @@ void StartDefaultTask(void *argument)
   /* USER CODE BEGIN 5 */
     (void) argument;
 
-    PERIF_Dynamixel_Init();
-    PERIF_Dynamixel_Configure();
+    // Wait until the servo task reports ready
+    osEventFlagsWait(systemEventsHandle,
+                         EVT_CONTROLLER_READY,
+                         osFlagsWaitAll,
+                         osWaitForever);
 
     uint32_t tick_count = osKernelGetTickCount();
 
-    controller_ctx_t controller_ctx;
-    controller_command_t cmd = {
-        .velocity = 0,
-        .heading = 0,
-        .height = 100,
-    };
-    controller_attitude_t attitude = {
-        .roll = 0.0f,
-        .pitch = 0.0f,
-        .yaw = 0.0f,
-    };
-
-    controller_init(&controller_ctx);
-    controller_set_state_callback(&controller_ctx, stm32_state_change_cb, NULL);
-
-    running_avg_t servo_read_ticks, servo_write_ticks, controller_update_ticks;
-
-    running_avg_init(&servo_read_ticks);
-    running_avg_init(&servo_write_ticks);
-    running_avg_init(&controller_update_ticks);
-
-    uint32_t t0, t1;
     int clock = 0;
-
-    osEventFlagsSet(systemEventsHandle, EVT_CONTROLLER_READY);
 
     /* Infinite loop */
     for (;;) {
         clock++;
-
-        cmd.velocity = updated_velocity;
-        cmd.heading = updated_heading;
-        cmd.height = updated_height;
-
-        t0 = osKernelGetTickCount();
-        // Determine the actual servo positions
-        for (int i = 0; i < 6; i++) {
-            struct leg_state *current_leg_state = &controller_ctx.robot.leg_state[i];
-            const struct leg *current_leg = &controller_ctx.cfg->leg[i];
-
-            dynamixel_servo_t leg_servos[3] = {
-                dynamixel_servo[current_leg->servos[0] - 1],
-                dynamixel_servo[current_leg->servos[1] - 1],
-                dynamixel_servo[current_leg->servos[2] - 1],
-            };
-            float32_t measured_leg_servo_angles[3];
-
-            if (read_actual_servo_position(leg_servos, 3, measured_leg_servo_angles) < 0) {
-                // LOG_WARN("Failed to read servo position for leg %d\r\n", i);
-                // Use the defined angles as a stop gap
-                // FIXME, these angles are uncompensated
-                arm_vec_copy_f32(controller_ctx.robot.leg_state[i].next_joint_angles,
-                                 controller_ctx.robot.leg_state[i].actual_joint_angles, 3);
-                continue;
-            }
-
-            // Compensate angles for geometry
-            if (controller_ctx.state == CTRL_SYNCING || controller_ctx.state == CTRL_BOOT || controller_ctx.state == CTRL_POWERDOWN) {
-                // We exclusively use the measured position
-                current_leg_state->actual_joint_angles[0] = measured_leg_servo_angles[0];
-                current_leg_state->actual_joint_angles[1] = -measured_leg_servo_angles[1];
-                current_leg_state->actual_joint_angles[2] = measured_leg_servo_angles[2] + D2R(25);
-            } else {
-                // We use a mix of the calculated angle and the measured angle to offset any measurement error
-                // and compensate for a bit of deadzone at low speeds
-                // Use alpha to tune the mix
-                float32_t compensated_angles[3] = {
-                    measured_leg_servo_angles[0],
-                    -measured_leg_servo_angles[1],
-                    measured_leg_servo_angles[2] + D2R(25)
-                };
-                const float32_t alpha = 0.8f;
-                current_leg_state->actual_joint_angles[0] = compensated_angles[0] * (1 - alpha) + alpha * current_leg_state->next_joint_angles[0];
-                current_leg_state->actual_joint_angles[1] = compensated_angles[1] * (1 - alpha) + alpha * current_leg_state->next_joint_angles[1];
-                current_leg_state->actual_joint_angles[2] = compensated_angles[2] * (1 - alpha) + alpha * current_leg_state->next_joint_angles[2];
-            }
-        }
-        t1 = osKernelGetTickCount();
-        running_avg_add(&servo_read_ticks, t1-t0);
-
-        t0 = osKernelGetTickCount();
-        controller_update(&controller_ctx, &attitude, &cmd, MAIN_LOOP_INTERVAL / 1000);
-        t1 = osKernelGetTickCount();
-        running_avg_add(&controller_update_ticks, t1-t0);
-
-        t0 = osKernelGetTickCount();
-        // Write next values to the servos
-        if (controller_ctx.state != CTRL_POWERDOWN) {
-            for (int i = 0; i < 6; i++) {
-                struct leg_state *current_leg_state = &controller_ctx.robot.leg_state[i];
-                const struct leg *current_leg = &controller_ctx.cfg->leg[i];
-
-                dynamixel_servo_t leg_servos[3] = {
-                    dynamixel_servo[current_leg->servos[0] - 1],
-                    dynamixel_servo[current_leg->servos[1] - 1],
-                    dynamixel_servo[current_leg->servos[2] - 1],
-                };
-                float32_t leg_servo_angles[3];
-
-                // Compensate angles for geometry
-                leg_servo_angles[0] = current_leg_state->next_joint_angles[0];
-                leg_servo_angles[1] = -current_leg_state->next_joint_angles[1];
-                leg_servo_angles[2] = current_leg_state->next_joint_angles[2] - D2R(25);
-
-                uint8_t limit_alert = 0;
-                for (int axis = 0; axis < 3; axis++) {
-                    if (leg_servo_angles[axis] < current_leg->limits[axis][0] || leg_servo_angles[axis] > current_leg->limits[axis][1]) {
-                        LOG_ERROR("Limit alert triggered, leg %d, axis %d", i, axis);
-                        LOG_ERROR("Calculated value %5.2f, limits %5.2f, %5.2f", leg_servo_angles[axis], current_leg->limits[axis][0], current_leg->limits[axis][1]);
-                        limit_alert = 1;
-                    }
-                }
-
-                if (limit_alert && controller_ctx.state == CTRL_WALKING) {
-                    cmd.velocity = 0.0f;
-                    controller_ctx.next_state = CTRL_POWERDOWN;
-                    continue;
-                }
-
-                write_next_servo_position(leg_servos, 3, leg_servo_angles);
-            }
-        }
-        t1 = osKernelGetTickCount();
-        running_avg_add(&servo_write_ticks, t1-t0);
 
         // FIXME clock is a horrible way to print data periodically, do better.
         if (clock % (5 * 5) == 0) {
@@ -1761,14 +1685,6 @@ void StartDefaultTask(void *argument)
                 mag_snapshot[0], mag_snapshot[1], mag_snapshot[2]);
             LOG_INFO("[EKF] roll %5.2f, pitch %5.2f, yaw %5.2f",
                 ekf_out.roll, ekf_out.pitch, ekf_out.yaw);
-        }
-
-        if (clock % (5 * 30) == 0) {
-            LOG_INFO("Average read ticks %ld, write ticks %ld, controller ticks %ld",
-                running_avg_get(&servo_read_ticks),
-                running_avg_get(&servo_write_ticks),
-                running_avg_get(&controller_update_ticks)
-            );
         }
 
         // Schedule at fixed 5 Hz
@@ -2102,8 +2018,7 @@ void StartMagTask(void *argument)
             osMessageQueuePut(ekf_queueHandle, &sample, 0, 10);
         }
 
-        // Schedule at 5 Hz
-        tick_count += (1000 / 5);
+        tick_count += MAG_LOOP_INTERVAL;
         osDelayUntil(tick_count);
     }
   /* USER CODE END StartMagTask */
@@ -2286,6 +2201,260 @@ void StartUsartTxTask(void *argument)
   /* USER CODE END StartUsartTxTask */
 }
 
+/* USER CODE BEGIN Header_StartControlTask */
+/**
+* @brief Function implementing the controlTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartControlTask */
+void StartControlTask(void *argument)
+{
+  /* USER CODE BEGIN StartControlTask */
+    UNUSED(argument);
+
+    // Wait until the servo task reports ready
+    osEventFlagsWait(systemEventsHandle,
+                         EVT_SERVO_READY,
+                         osFlagsWaitAll,
+                         osWaitForever);
+
+    uint32_t tick_count = osKernelGetTickCount();
+
+    controller_ctx_t controller_ctx;
+    controller_command_t cmd = {
+        .velocity = 0,
+        .heading = 0,
+        .height = 100,
+    };
+    controller_attitude_t attitude = {
+        .roll = 0.0f,
+        .pitch = 0.0f,
+        .yaw = 0.0f,
+    };
+
+    controller_init(&controller_ctx);
+    controller_set_state_callback(&controller_ctx, stm32_state_change_cb, NULL);
+
+    osEventFlagsSet(systemEventsHandle, EVT_CONTROLLER_READY);
+
+    TickType_t last_ticks = osKernelGetTickCount();
+  /* Infinite loop */
+  for(;;)
+  {
+      TickType_t now = osKernelGetTickCount();
+      TickType_t dt_ticks = now - last_ticks;
+      last_ticks = now;
+
+      float dt_s = (float)dt_ticks * (float)portTICK_PERIOD_MS * 1e-3f;
+      dt_s = clampf(dt_s, 0.0005f, 0.05f);
+
+      // Update control information from shared state
+      cmd.velocity = updated_velocity;
+      cmd.heading = updated_heading;
+      cmd.height = updated_height;
+
+      controller_update(&controller_ctx, &attitude, &cmd, dt_s);
+
+      tick_count += CONTROL_LOOP_INTERVAL;
+      osDelayUntil(tick_count);
+  }
+  /* USER CODE END StartControlTask */
+}
+
+/* USER CODE BEGIN Header_StartServoTask */
+/**
+* @brief Function implementing the servoTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartServoTask */
+void StartServoTask(void *argument)
+{
+  /* USER CODE BEGIN StartServoTask */
+    UNUSED(argument);
+    servo_state_t state = SERVO_INIT;
+
+    uint32_t tick_count = osKernelGetTickCount();
+    uint32_t last_ticks = 0;
+
+    float32_t measured_position[6][3];
+    float32_t measured_compensated_position[6][3];
+    float32_t actual_position[6][3];
+    float32_t commanded_position[6][3];
+    float32_t commanded_uncompensated_position[6][3];
+    float32_t last_velocity[6][3] = {0};
+
+  /* Infinite loop */
+  for(;;)
+  {
+      if (servo_shared_state.request_powerdown && state != SERVO_IDLE) {
+          state = SERVO_POWER_DOWN;
+      }
+      if (!servo_shared_state.request_powerdown && state == SERVO_IDLE) {
+          state = SERVO_POWER_UP;
+      }
+    switch (state) {
+        case SERVO_INIT:
+            PERIF_Dynamixel_Init();
+            PERIF_Dynamixel_Configure();
+            state = SERVO_SYNC_FROM_HW;
+            break;
+        case SERVO_SYNC_FROM_HW:
+            // We use the fact that the dynamixel servo list is ordered
+            // similar to our [6][3] structures but flattened
+            if (read_actual_servo_position(dynamixel_servos, 18, &measured_position[0][0]) < 0) {
+                LOG_ERROR("[ServoTask] Failed to read actual servo positions");
+                Error_Handler();
+            };
+
+            for (int i=0; i<6; i++) {
+                compensate_geometry_from_servo(measured_position[i], servo_shared_state.actual_joint_angles[i]);
+            }
+            memcpy(servo_shared_state.target_joint_angles, servo_shared_state.actual_joint_angles, sizeof(servo_shared_state.target_joint_angles));
+
+            osEventFlagsSet(systemEventsHandle, EVT_SERVO_READY);
+            state = SERVO_SYNC_TO_HW;
+            break;
+        case SERVO_SYNC_TO_HW:
+            for (int i=0; i<6; i++) {
+
+                dynamixel_servo_t leg_servos[3] = {
+                    dynamixel_servos[3 * i],
+                    dynamixel_servos[3 * i + 1],
+                    dynamixel_servos[3 * i + 2],
+                };
+                float32_t leg_servo_angles[3];
+
+                // Compensate angles for geometry
+                compensate_geometry_to_servo(servo_shared_state.target_joint_angles[i], leg_servo_angles);
+
+                write_next_servo_position(leg_servos, 3, leg_servo_angles);
+            }
+            state = SERVO_RUNNING;
+            break;
+        case SERVO_RUNNING: {
+            // A) Read the current angles from the servos into actual_position
+            const int res = read_actual_servo_position(dynamixel_servos, 18, &measured_position[0][0]);
+            if (res == 0) {
+                // We have a position so use it
+                for (int i=0; i<6; i++) {
+                    compensate_geometry_from_servo(measured_position[i], measured_compensated_position[i]);
+                }
+
+                memcpy(actual_position, measured_compensated_position, sizeof(actual_position));
+            } else {
+                // We use the last position we know
+                memcpy(actual_position, servo_shared_state.actual_joint_angles, sizeof(actual_position));
+            }
+
+            // B) Interpolate toward target
+            // Apply deadband, error accumulation and step clamping
+            uint32_t now = osKernelGetTickCount();
+            TickType_t dt_ticks = now - last_ticks;
+            last_ticks = now;
+            float32_t dt_s = (float32_t)dt_ticks * (float32_t)portTICK_PERIOD_MS * 1e-3f;
+            dt_s = clampf(dt_s, 0.0005f, 0.05f); // avoid stalls & spikes
+
+            float32_t max_step = SERVO_MAX_VELOCITY * dt_s;
+            uint8_t limit_alert = 0;
+            for (int i=0; i<6; i++) {
+                for (int j=0; j<3; j++) {
+                    // Determine the remaining movement for this control step
+                    float32_t error = servo_shared_state.target_joint_angles[i][j] - actual_position[i][j];
+
+                    // Step size with deadbanding and quantization
+                    float32_t step = 0.0f;
+                    if (fabsf(error) >= SERVO_DEADBAND_RAD) {
+                        step = clampf(error, -max_step, max_step);
+
+                        if (fabsf(step) < SERVO_MIN_STEP_RAD) {
+                            step = copysignf(SERVO_MIN_STEP_RAD, step);
+                        }
+                    }
+
+                    // Acceleration control
+                    float32_t desired_vel = clampf(
+                        step / dt_s,
+                        -SERVO_MAX_VELOCITY,
+                        +SERVO_MAX_VELOCITY
+                    );
+                    float32_t dv = desired_vel - last_velocity[i][j];
+
+                    dv = clampf(dv, -SERVO_MAX_ACCELERATION * dt_s, +SERVO_MAX_ACCELERATION * dt_s);
+
+                    float32_t vel = last_velocity[i][j] + dv;
+                    step = vel * dt_s;
+
+                    last_velocity[i][j] = vel;
+
+                    commanded_position[i][j] = actual_position[i][j] + step;
+
+                    // Check motion limits
+                    if (commanded_position[i][j] < r.leg[i].limits[j][0] || commanded_position[i][j] > r.leg[i].limits[j][1]) {
+                        LOG_ERROR("Limit alert triggered, leg %d, axis %d", i, j);
+                        LOG_ERROR("Calculated value %5.2f, limits %5.2f, %5.2f", commanded_position[i][j], r.leg[i].limits[j][0], r.leg[i].limits[j][1]);
+                        limit_alert = 1;
+                    }
+
+                }
+                compensate_geometry_to_servo(commanded_position[i], commanded_uncompensated_position[i]);
+            }
+
+            if (limit_alert) {
+                state = SERVO_ERROR;
+                continue;
+            }
+
+            // C) Write the new target positions to the servos
+            write_next_servo_position(dynamixel_servos, 18, &commanded_uncompensated_position[0][0]);
+
+            // D) Blend the actual readings into the shared state
+            for (int i=0; i<6; i++) {
+                for (int j=0; j<3; j++) {
+                    // Blend measured position into the shared state for the controller
+                    servo_shared_state.actual_joint_angles[i][j] =
+                        (1 - ALPHA) * servo_shared_state.actual_joint_angles[i][j] + ALPHA * actual_position[i][j];
+                }
+            }
+
+            break;
+        }
+        case SERVO_ERROR:
+            // disable torque on all motors
+            for (int i=0; i<18; i++) {
+                dynamixel_set_torque_enable(&dynamixel_servos[i], 0);
+                dynamixel_set_led(&dynamixel_servos[i], 0);
+            }
+            Error_Handler();
+            // notify error
+            break;
+        case SERVO_POWER_DOWN:
+            // disable torque on all motors
+            for (int i=0; i<18; i++) {
+                dynamixel_set_torque_enable(&dynamixel_servos[i], 0);
+                dynamixel_set_led(&dynamixel_servos[i], 0);
+            }
+            state = SERVO_IDLE;
+            break;
+        case SERVO_IDLE:
+            // Nothing to do here
+            break;
+        case SERVO_POWER_UP:
+            for (int i=0; i<18; i++) {
+                dynamixel_set_torque_enable(&dynamixel_servos[i], 1);
+                dynamixel_set_led(&dynamixel_servos[i], 1);
+            }
+            state = SERVO_SYNC_FROM_HW;
+            break;
+    }
+
+    tick_count += SERVO_LOOP_INTERVAL;
+    osDelayUntil(tick_count);
+  }
+  /* USER CODE END StartServoTask */
+}
+
 /**
   * @brief  Period elapsed callback in non blocking mode
   * @note   This function is called  when TIM2 interrupt took place, inside
@@ -2323,12 +2492,12 @@ void Error_Handler(void)
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_SET);
 
-    printf("\n\n=== FATAL ERROR ===\n");
-    printf("Thread: %s\n", osThreadGetName(osThreadGetId()));
+    printf("\r\n\r\n=== FATAL ERROR ===\r\n");
+    printf("Thread: %s\r\n", osThreadGetName(osThreadGetId()));
 
     error_print_backtrace();
 
-    printf("System halted.\n");
+    printf("System halted.\r\n");
 
     for (;;) {
         __BKPT(0);   // Optional: break into debugger

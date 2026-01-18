@@ -6,7 +6,7 @@
 
 void error_print_backtrace_from_sp(uint32_t *sp)
 {
-    printf("\nBacktrace (best effort):\n");
+    printf("\r\nBacktrace (best effort):\r\n");
 
     for (int i = 0; i < 16; i++) {
         uint32_t addr = sp[i];
@@ -15,7 +15,7 @@ void error_print_backtrace_from_sp(uint32_t *sp)
             (addr < FLASH_END) &&
             (addr & 1)) {
 
-            printf("  #%02d 0x%08lx\n", i, addr & ~1UL);
+            printf("  #%02d 0x%08lx\r\n", i, addr & ~1UL);
             }
     }
 }
@@ -40,19 +40,19 @@ void hardfault_c(uint32_t *sp)
     uint32_t pc  = sp[6];
     uint32_t psr = sp[7];
 
-    printf("\n\n=== HARD FAULT ===\n");
-    printf("R0  = 0x%08lx\n", r0);
-    printf("R1  = 0x%08lx\n", r1);
-    printf("R2  = 0x%08lx\n", r2);
-    printf("R3  = 0x%08lx\n", r3);
-    printf("R12 = 0x%08lx\n", r12);
-    printf("LR  = 0x%08lx\n", lr);
-    printf("PC  = 0x%08lx\n", pc);
-    printf("PSR = 0x%08lx\n", psr);
+    printf("\r\n\r\n=== HARD FAULT ===\r\n");
+    printf("R0  = 0x%08lx\r\n", r0);
+    printf("R1  = 0x%08lx\r\n", r1);
+    printf("R2  = 0x%08lx\r\n", r2);
+    printf("R3  = 0x%08lx\r\n", r3);
+    printf("R12 = 0x%08lx\r\n", r12);
+    printf("LR  = 0x%08lx\r\n", lr);
+    printf("PC  = 0x%08lx\r\n", pc);
+    printf("PSR = 0x%08lx\r\n", psr);
 
     error_print_backtrace_from_sp(sp);
 
-    printf("System halted.\n");
+    printf("System halted.\r\n");
 
     for (;;) {
         __BKPT(0);

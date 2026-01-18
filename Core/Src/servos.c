@@ -10,9 +10,6 @@
 
 #include "log.h"
 
-#include "servos.h"
-
-
 #define RAD_PER_PULSE (float)(2 * M_PI / 4096)
 
 static uint32_t angle_to_pulse(float32_t angle) {
@@ -25,13 +22,25 @@ static float32_t pulse_to_angle(uint32_t pulse) {
     return (float) pulse * RAD_PER_PULSE - (float) M_PI;
 }
 
+void compensate_geometry_from_servo(const float32_t src[3], float32_t compensated[3]) {
+    compensated[0] = src[0];
+    compensated[1] = -src[1];
+    compensated[2] = src[2] + (float32_t)D2R(25);
+}
+
+void compensate_geometry_to_servo(const float32_t src[3], float32_t compensated[3]) {
+    compensated[0] = src[0];
+    compensated[1] = -src[1];
+    compensated[2] = src[2] - (float32_t)D2R(25);
+}
+
 int read_actual_servo_position(dynamixel_servo_t *servos, const uint8_t servo_count, float32_t *actual_servo_angles) {
     // Read actual position
     uint32_t actual_position[servo_count];
-    const dynamixel_result_t res = dynamixel_sync_get_long_parameter(servos, XL430_CT_RAM_PRESENT_POSITION,
-                                                               actual_position, servo_count);
+    const dynamixel_result_t res = dynamixel_get_long_parameter_multiple(servos, servo_count,
+        XL430_CT_RAM_PRESENT_POSITION, actual_position);
     if (res != DNM_OK) {
-        // LOG_ERROR("Failed to get long position using sync read: %d", res);
+        LOG_ERROR("Failed to get long position using sync read: %d", res);
         return -1;
     }
 
@@ -50,7 +59,7 @@ int write_next_servo_position(dynamixel_servo_t *servos, uint8_t servo_count, co
     for (int i = 0; i < servo_count; i++) {
         position_next[i] = angle_to_pulse(next_servo_angles[i]);
     }
-    const dynamixel_result_t res = dynamixel_sync_set_long_parameter(servos, XL430_CT_RAM_GOAL_POSITION, position_next, servo_count);
+    const dynamixel_result_t res = dynamixel_set_long_parameter_multiple(servos, servo_count, XL430_CT_RAM_GOAL_POSITION, position_next);
 
     if (res != DNM_OK) {
         LOG_ERROR("Failed to write long position using sync write: %d", res);
