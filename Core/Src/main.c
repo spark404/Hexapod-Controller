@@ -55,7 +55,6 @@
 #include "error_handling.h"
 #include "event_groups.h"
 #include "rgb_led.h"
-#include "measure.h"
 #include "robot_config.h"
 #include "sensors.h"
 
@@ -112,11 +111,11 @@ MATRIX(M, 4)
 
 #define HZ_TO_INTERVAL(hz) (1000 / (uint32_t)(hz))
 #define MAIN_LOOP_INTERVAL HZ_TO_INTERVAL(1)
-#define CONTROL_LOOP_INTERVAL HZ_TO_INTERVAL(100)
-#define SERVO_LOOP_INTERVAL HZ_TO_INTERVAL(200)
+#define CONTROL_LOOP_INTERVAL HZ_TO_INTERVAL(50)
+#define SERVO_LOOP_INTERVAL HZ_TO_INTERVAL(100)
 #define MAG_LOOP_INTERVAL HZ_TO_INTERVAL(5)
 
-#define DMA_RX_BUF_SIZE 1024 // Can handle 2.5ms of data at 4Mbps
+#define DMA_RX_BUF_SIZE 1024 // Can handle 2.5 ms of data at 4 Mbps
 #define RX_RING_SIZE 4096    // Enough space to handle driver delay
 
 #define RX_DMA_TC 0x1
@@ -160,7 +159,7 @@ DMA_HandleTypeDef hdma_usart6_rx;
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
-  .stack_size = 2048 * 4,
+  .stack_size = 1024 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for spiSlaveTask */
@@ -195,7 +194,7 @@ const osThreadAttr_t magTask_attributes = {
 osThreadId_t ekfTaskHandle;
 const osThreadAttr_t ekfTask_attributes = {
   .name = "ekfTask",
-  .stack_size = 1024 * 4,
+  .stack_size = 2048 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for usartRxTask */
@@ -210,20 +209,20 @@ osThreadId_t usartTxTaskHandle;
 const osThreadAttr_t usartTxTask_attributes = {
   .name = "usartTxTask",
   .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+  .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for controlTask */
 osThreadId_t controlTaskHandle;
 const osThreadAttr_t controlTask_attributes = {
   .name = "controlTask",
-  .stack_size = 512 * 4,
+  .stack_size = 2048 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for servoTask */
 osThreadId_t servoTaskHandle;
 const osThreadAttr_t servoTask_attributes = {
   .name = "servoTask",
-  .stack_size = 512 * 4,
+  .stack_size = 1600 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for ekf_queue */
@@ -425,8 +424,8 @@ int main(void)
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_RESET);
 
-    PERIF_BMI088_Init();
-    PERIF_BMM350_Init();
+    // PERIF_BMI088_Init();
+    // PERIF_BMM350_Init();
     // PERIF_BNO055_Init();
 
     LOG_INFO("[Main] Initialisation complete");
@@ -1038,10 +1037,10 @@ BMI08_INTF_RET_TYPE stm32_bmi08_read(uint8_t reg_addr, uint8_t *reg_data, uint32
     HAL_GPIO_WritePin(spi_intf->CS_Port, spi_intf->CS_Pin, GPIO_PIN_RESET);
 
     HAL_SPI_Transmit(spi_intf->hspi, &reg_addr, 1, 50);
-    while (HAL_SPI_GetState(spi_intf->hspi) == HAL_SPI_STATE_BUSY);
+    while (HAL_SPI_GetState(spi_intf->hspi) == HAL_SPI_STATE_BUSY) {}
 
     HAL_SPI_Receive(spi_intf->hspi, reg_data, len, 50);
-    while (HAL_SPI_GetState(spi_intf->hspi) == HAL_SPI_STATE_BUSY);
+    while (HAL_SPI_GetState(spi_intf->hspi) == HAL_SPI_STATE_BUSY) {}
 
     HAL_GPIO_WritePin(spi_intf->CS_Port, spi_intf->CS_Pin, GPIO_PIN_SET);
 
@@ -1058,10 +1057,10 @@ BMI08_INTF_RET_TYPE stm32_bmi08_write(uint8_t reg_addr, const uint8_t *reg_data,
     HAL_GPIO_WritePin(spi_intf->CS_Port, spi_intf->CS_Pin, GPIO_PIN_RESET);
 
     HAL_SPI_Transmit(spi_intf->hspi, &reg_addr, 1, 50);
-    while (HAL_SPI_GetState(spi_intf->hspi) == HAL_SPI_STATE_BUSY);
+    while (HAL_SPI_GetState(spi_intf->hspi) == HAL_SPI_STATE_BUSY) {}
 
     HAL_SPI_Transmit(spi_intf->hspi, (uint8_t *) reg_data, len, 50);
-    while (HAL_SPI_GetState(spi_intf->hspi) == HAL_SPI_STATE_BUSY);
+    while (HAL_SPI_GetState(spi_intf->hspi) == HAL_SPI_STATE_BUSY) {}
 
     HAL_GPIO_WritePin(spi_intf->CS_Port, spi_intf->CS_Pin, GPIO_PIN_SET);
 
@@ -1348,6 +1347,10 @@ static void stm32_state_change_cb(
         case CTRL_POWERDOWN:
             servo_shared_state.request_powerdown = false;
             break;
+        case CTRL_WALKING:
+        case CTRL_ROTATING:
+            servo_shared_state.limit_alert_enabled = false;
+            break;
         default:
             break;
     }
@@ -1369,10 +1372,12 @@ static void stm32_state_change_cb(
         case CTRL_WALKING:
             rgb_led_set_color(RGB_LED_COLOR_BLUE);
             rgb_led_blink(500, 0.5f);
+            servo_shared_state.limit_alert_enabled = true;
             break;
         case CTRL_ROTATING:
             rgb_led_set_color(RGB_LED_COLOR_YELLOW);
             rgb_led_blink(500, 0.5f);
+            servo_shared_state.limit_alert_enabled = true;
             break;
         default:
             break;
@@ -1640,8 +1645,8 @@ void PERIF_Dynamixel_Configure() {
         // Check and configure Return Delay Time
         uint8_t rdt;
         dynamixel_get_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_RETURN_DELAY_TIME, &rdt);
-        if (rdt != 5) {
-            dynamixel_set_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_RETURN_DELAY_TIME, 5);
+        if (rdt != 20) {
+            dynamixel_set_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_RETURN_DELAY_TIME, 20);
         }
 
         dynamixel_set_led(&dynamixel_servos[i], 0);
@@ -1993,12 +1998,13 @@ void StartMagTask(void *argument)
 
     uint32_t tick_count = osKernelGetTickCount();
 
-    float32_t bias[3] = { +37, -24, +35 };
+    // float32_t bias[3] = { +37, -24, +35 };
+    float32_t bias[3] = { 0, 0, 0 };
 
     /* Infinite loop */
     for(;;) {
         if (bmm350_get_compensated_mag_xyz_temp_data(&data, &bmm350) < 0) {
-            LOG_ERROR("[MagTask] Failed to get data");
+            // LOG_ERROR("[MagTask] Failed to get data");
         } else {
             // Convert sensor frame to NED
             // Values reported in uT (micro Tesla)
@@ -2056,7 +2062,7 @@ void StartEkfTask(void *argument)
         if (osMessageQueueGet(ekf_queueHandle, &sample, NULL, osWaitForever) == osOK) {
 
             if (sample.type == SENSOR_GYRO) {
-                float32_t dt = (sample.tick - last_gyro_tick) * portTICK_PERIOD_MS * 0.001f;
+                float32_t dt = (float32_t)(sample.tick - last_gyro_tick) * portTICK_PERIOD_MS * 0.001f;
                 last_gyro_tick = sample.tick;
 
                 attitude_ekf_predict(&ekf, sample.data, dt);
@@ -2124,11 +2130,11 @@ void StartUsartRxTask(void *argument)
         Error_Handler();
     };
 
-    uint32_t flags;
-    /* Infinite loop */
+  /* Infinite loop */
     for(;;)
     {
-        flags = osThreadFlagsWait(RX_DMA_HT | RX_DMA_TC | RX_DMA_IDLE | RX_DMA_ERROR, osFlagsWaitAny, osWaitForever);
+        const uint32_t flags = osThreadFlagsWait(RX_DMA_HT | RX_DMA_TC | RX_DMA_IDLE | RX_DMA_ERROR, osFlagsWaitAny,
+                                           osWaitForever);
 
         if (flags & (RX_DMA_HT | RX_DMA_TC | RX_DMA_IDLE)) {
             uart_rx_drain_dma();
@@ -2255,7 +2261,25 @@ void StartControlTask(void *argument)
       cmd.heading = updated_heading;
       cmd.height = updated_height;
 
+      // Update the actual from the shared state
+      for (int i = 0; i < 6; i++) {
+          struct leg_state *current_leg_state = &controller_ctx.robot.leg_state[i];
+
+          current_leg_state->actual_joint_angles[0] = servo_shared_state.actual_joint_angles[i][0];
+          current_leg_state->actual_joint_angles[1] = servo_shared_state.actual_joint_angles[i][1];
+          current_leg_state->actual_joint_angles[2] = servo_shared_state.actual_joint_angles[i][2];
+      }
+
       controller_update(&controller_ctx, &attitude, &cmd, dt_s);
+
+      // Update the shared state from the controller state
+      for (int i = 0; i < 6; i++) {
+          struct leg_state *current_leg_state = &controller_ctx.robot.leg_state[i];
+
+          servo_shared_state.target_joint_angles[i][0] = current_leg_state->next_joint_angles[0];
+          servo_shared_state.target_joint_angles[i][1] = current_leg_state->next_joint_angles[1];
+          servo_shared_state.target_joint_angles[i][2] = current_leg_state->next_joint_angles[2];
+      }
 
       tick_count += CONTROL_LOOP_INTERVAL;
       osDelayUntil(tick_count);
@@ -2299,14 +2323,14 @@ void StartServoTask(void *argument)
         case SERVO_INIT:
             PERIF_Dynamixel_Init();
             PERIF_Dynamixel_Configure();
-            state = SERVO_SYNC_FROM_HW;
+            state = SERVO_POWER_UP;
             break;
         case SERVO_SYNC_FROM_HW:
             // We use the fact that the dynamixel servo list is ordered
             // similar to our [6][3] structures but flattened
             if (read_actual_servo_position(dynamixel_servos, 18, &measured_position[0][0]) < 0) {
                 LOG_ERROR("[ServoTask] Failed to read actual servo positions");
-                Error_Handler();
+                break;
             };
 
             for (int i=0; i<6; i++) {
@@ -2314,7 +2338,6 @@ void StartServoTask(void *argument)
             }
             memcpy(servo_shared_state.target_joint_angles, servo_shared_state.actual_joint_angles, sizeof(servo_shared_state.target_joint_angles));
 
-            osEventFlagsSet(systemEventsHandle, EVT_SERVO_READY);
             state = SERVO_SYNC_TO_HW;
             break;
         case SERVO_SYNC_TO_HW:
@@ -2332,6 +2355,7 @@ void StartServoTask(void *argument)
 
                 write_next_servo_position(leg_servos, 3, leg_servo_angles);
             }
+            osEventFlagsSet(systemEventsHandle, EVT_SERVO_READY);
             state = SERVO_RUNNING;
             break;
         case SERVO_RUNNING: {
@@ -2392,17 +2416,19 @@ void StartServoTask(void *argument)
                     commanded_position[i][j] = actual_position[i][j] + step;
 
                     // Check motion limits
-                    if (commanded_position[i][j] < r.leg[i].limits[j][0] || commanded_position[i][j] > r.leg[i].limits[j][1]) {
-                        LOG_ERROR("Limit alert triggered, leg %d, axis %d", i, j);
-                        LOG_ERROR("Calculated value %5.2f, limits %5.2f, %5.2f", commanded_position[i][j], r.leg[i].limits[j][0], r.leg[i].limits[j][1]);
-                        limit_alert = 1;
+                    if (servo_shared_state.limit_alert_enabled) {
+                        if (commanded_position[i][j] < r.leg[i].limits[j][0] || commanded_position[i][j] > r.leg[i].limits[j][1]) {
+                            LOG_ERROR("Limit alert triggered, leg %d, axis %d", i, j);
+                            LOG_ERROR("Calculated value %5.2f, limits %5.2f, %5.2f", commanded_position[i][j], r.leg[i].limits[j][0], r.leg[i].limits[j][1]);
+                            limit_alert = 1;
+                        }
                     }
 
                 }
                 compensate_geometry_to_servo(commanded_position[i], commanded_uncompensated_position[i]);
             }
 
-            if (limit_alert) {
+            if (limit_alert && servo_shared_state.limit_alert_enabled) {
                 state = SERVO_ERROR;
                 continue;
             }
@@ -2450,7 +2476,7 @@ void StartServoTask(void *argument)
             break;
     }
 
-    tick_count += SERVO_LOOP_INTERVAL;
+    tick_count += pdMS_TO_TICKS(SERVO_LOOP_INTERVAL);
     osDelayUntil(tick_count);
   }
   /* USER CODE END StartServoTask */

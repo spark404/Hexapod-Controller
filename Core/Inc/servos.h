@@ -17,6 +17,7 @@ typedef struct {
     float32_t target_joint_angles[6][3];
     bool initialized;
     bool request_powerdown;
+    bool limit_alert_enabled;
 } servo_shared_state_t;
 
 typedef enum {
@@ -27,7 +28,7 @@ typedef enum {
     SERVO_ERROR,
     SERVO_POWER_DOWN,
     SERVO_IDLE,
-    SERVO_POWER_UP
+    SERVO_POWER_UP,
 } servo_state_t;
 
 void compensate_geometry_from_servo(const float32_t src[3], float32_t compensated[3]);
