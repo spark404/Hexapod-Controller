@@ -1606,18 +1606,19 @@ void PERIF_Dynamixel_Init() {
     for (int i = 0; i < 6; i++) {
         for (int j = 0; j < 3; j++) {
             const uint8_t id = r.leg[i].servos[j];
+            const int index = i * 3 + j;
             LOG_INFO("Checking Servo %d, leg %d, joint %d...", id, i, j);
 
-            DYNAMIXEL_ERROR_CHECK(dynamixel_init(&dynamixel_servos[i], id, DYNAMIXEL_XL430, &dynamixel_bus));
+            DYNAMIXEL_ERROR_CHECK(dynamixel_init(&dynamixel_servos[index], id, DYNAMIXEL_XL430, &dynamixel_bus));
 
-            const dynamixel_error_t res = dynamixel_ping(&dynamixel_servos[i]);
+            const dynamixel_error_t res = dynamixel_ping(&dynamixel_servos[index]);
             if (res == STATUS_ALERT_FLAG) {
-                LOG_ERROR("Servo %d hardware alert", i);
+                LOG_ERROR("Servo %d hardware alert", id);
                 uint8_t hardware_status;
-                if (dynamixel_get_byte_parameter(&dynamixel_servos[i], 70, &hardware_status) != STATUS_OK) {
-                    LOG_ERROR("Servo %d failed to read hardware status", i);
+                if (dynamixel_get_byte_parameter(&dynamixel_servos[index], XL430_CT_RAM_HARDWARE_ERR_STATUS, &hardware_status) != STATUS_OK) {
+                    LOG_ERROR("Servo %d failed to read hardware status", id);
                 } else {
-                    LOG_ERROR("Servo %d hardware status: 0x%02x", i, hardware_status);
+                    LOG_ERROR("Servo %d hardware status: 0x%02x", id, hardware_status);
                 }
                 error_count++;
             } else if (res != DYNAMIXEL_ERROR_NONE) {
@@ -2493,7 +2494,12 @@ void Error_Handler(void)
     HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_SET);
 
     printf("\r\n\r\n=== FATAL ERROR ===\r\n");
-    printf("Thread: %s\r\n", osThreadGetName(osThreadGetId()));
+    osThreadId_t currentThread = osThreadGetId();
+    if (currentThread != NULL) {
+        printf("Thread: %s\r\n", osThreadGetName(osThreadGetId()));
+    } else {
+        printf("Threads not started yet\r\n");
+    }
 
     error_print_backtrace();
 
