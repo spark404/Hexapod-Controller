@@ -273,6 +273,12 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
             if (distance_remaining > CTRL_CLOSE_THRESH) {
                 ready = 0;
             };
+
+            if (i==0) {
+                LOG_DEBUG("C: %.3f, %.3f, %.3f; T: %.3f, %.3f, %.3f",
+                    p_current_in_body_frame[0], p_current_in_body_frame[1], p_current_in_body_frame[2],
+                    p_target_in_body_frame[0], p_target_in_body_frame[1], p_target_in_body_frame[2]);
+            }
         }
 
         if (ready) {

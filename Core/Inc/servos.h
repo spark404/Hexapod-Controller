@@ -31,10 +31,11 @@ typedef enum {
     SERVO_POWER_UP,
 } servo_state_t;
 
-void compensate_geometry_from_servo(const float32_t src[3], float32_t compensated[3]);
-void compensate_geometry_to_servo(const float32_t src[3], float32_t compensated[3]);
+float32_t xl430_pulse_to_rad_centered(const uint16_t pulse);
+uint16_t xl430_rad_centered_to_pulse(const float32_t rad);
 
-int read_actual_servo_position(dynamixel_servo_t *servos, uint8_t servo_count, float32_t *actual_servo_angles);
-int write_next_servo_position(dynamixel_servo_t *servos, uint8_t servo_count, const float32_t *next_servo_angles);
+void compensate(const float src[3], float dst[3]);
+void uncompensate(const float src[3], float dst[3]);
+
 
 #endif //SERVOS_H

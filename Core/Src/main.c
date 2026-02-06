@@ -130,7 +130,7 @@ MATRIX(M, 4)
 #define SERVO_MAX_ACCELERATION  30.0f   // rad/s²
 
 // Blend rate for merging actual measurements into state
-#define ALPHA 0.1f
+#define ALPHA 1.0f
 
 /* USER CODE END PD */
 
@@ -181,7 +181,7 @@ osThreadId_t accelTaskHandle;
 const osThreadAttr_t accelTask_attributes = {
   .name = "accelTask",
   .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityAboveNormal,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for magTask */
 osThreadId_t magTaskHandle;
@@ -209,21 +209,21 @@ osThreadId_t usartTxTaskHandle;
 const osThreadAttr_t usartTxTask_attributes = {
   .name = "usartTxTask",
   .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityHigh,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for controlTask */
 osThreadId_t controlTaskHandle;
 const osThreadAttr_t controlTask_attributes = {
   .name = "controlTask",
   .stack_size = 2048 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+  .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for servoTask */
 osThreadId_t servoTaskHandle;
 const osThreadAttr_t servoTask_attributes = {
   .name = "servoTask",
   .stack_size = 1600 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+  .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for ekf_queue */
 osMessageQueueId_t ekf_queueHandle;
@@ -1170,42 +1170,21 @@ ssize_t usart_read(uint8_t *dst, const size_t len, const uint32_t timeout) {
         return -1;
     }
 
-    taskENTER_CRITICAL();
-    size_t avail = ringbuf_available(&rx_ring);
-    taskEXIT_CRITICAL();
-
-    size_t to_read = avail > len ? len : avail;
-
-    taskENTER_CRITICAL();
-    count = ringbuf_read(&rx_ring, dst, to_read);
-    taskEXIT_CRITICAL();
-
-    // Shortcut if everything was read from the ringbuffer
-    if (count == len) {
-        osMutexRelease(usartMutexHandle);
-        return (ssize_t)count;
-    }
-
-    /* Wait for first byte */
-    if (osSemaphoreAcquire(usart_rx_semHandle, timeout) != osOK) {
-        osMutexRelease(usartMutexHandle);
-        return (ssize_t)count;   // timeout, partial data
-    }
-
-    /* First byte is guaranteed */
-    taskENTER_CRITICAL();
-    ringbuf_pop(&rx_ring, &dst[count++]);
-    taskEXIT_CRITICAL();
-
-    /* Drain remaining bytes without blocking */
     while (count < len) {
-        if (osSemaphoreAcquire(usart_rx_semHandle, 0) != osOK) {
-            break;
-        }
-
         taskENTER_CRITICAL();
-        ringbuf_pop(&rx_ring, &dst[count++]);
+        size_t avail = ringbuf_available(&rx_ring);
+        if (avail > 0) {
+            size_t to_copy = (avail > (len - count)) ? (len - count) : avail;
+            count += ringbuf_read(&rx_ring, &dst[count], to_copy);
+        }
         taskEXIT_CRITICAL();
+
+        if (count >= len) break;
+
+        // Wait for more data
+        if (osSemaphoreAcquire(usart_rx_semHandle, timeout) != osOK) {
+            break; // Timeout, return what we have
+        }
     }
 
     osMutexRelease(usartMutexHandle);
@@ -1384,7 +1363,7 @@ static void stm32_state_change_cb(
     }
 }
 
-static inline size_t dma_rx_write_idx(void)
+static size_t dma_rx_write_idx(void)
 {
     return DMA_RX_BUF_SIZE - __HAL_DMA_GET_COUNTER(huart6.hdmarx);
 }
@@ -1406,7 +1385,7 @@ static void uart_rx_drain_dma(void)
     taskEXIT_CRITICAL();
 
     if (pushed) {
-        xSemaphoreGive(usart_rx_semHandle);
+        osSemaphoreRelease(usart_rx_semHandle);
     }
 }
 
@@ -1415,7 +1394,7 @@ ssize_t dynamixel_read_uart_dma_new(
     size_t size,
     void *pvContext) {
     UNUSED(pvContext);
-    return usart_read(rxBuffer, size, pdMS_TO_TICKS(50));
+    return usart_read(rxBuffer, size, pdMS_TO_TICKS(2));
 }
 
 ssize_t dynamixel_write_uart_dma_new(
@@ -1423,7 +1402,7 @@ ssize_t dynamixel_write_uart_dma_new(
     size_t size,
     void *pvContext) {
     UNUSED(pvContext);
-    return usart_write(txBuffer, size, pdMS_TO_TICKS(50));
+    return usart_write(txBuffer, size, pdMS_TO_TICKS(3));
 }
 
 /**
@@ -2303,22 +2282,26 @@ void StartServoTask(void *argument)
     uint32_t tick_count = osKernelGetTickCount();
     uint32_t last_ticks = 0;
 
-    float32_t measured_position[6][3];
-    float32_t measured_compensated_position[6][3];
-    float32_t actual_position[6][3];
-    float32_t commanded_position[6][3];
-    float32_t commanded_uncompensated_position[6][3];
-    float32_t last_velocity[6][3] = {0};
+    uint32_t values[6][3] = {0};
+    float32_t angles[6][3] = {{ 0.0f }};
+    float32_t joint_angles[6][3] = {{ 0.0f }};
+    float32_t last_velocity[6][3] = {{0.0f }};
+    float32_t commanded_position[6][3] = {{0.0f}};
+
+    int limit_alert = 0;
 
   /* Infinite loop */
   for(;;)
   {
+      limit_alert = 0;
+
       if (servo_shared_state.request_powerdown && state != SERVO_IDLE) {
           state = SERVO_POWER_DOWN;
       }
       if (!servo_shared_state.request_powerdown && state == SERVO_IDLE) {
           state = SERVO_POWER_UP;
       }
+
     switch (state) {
         case SERVO_INIT:
             PERIF_Dynamixel_Init();
@@ -2328,53 +2311,77 @@ void StartServoTask(void *argument)
         case SERVO_SYNC_FROM_HW:
             // We use the fact that the dynamixel servo list is ordered
             // similar to our [6][3] structures but flattened
-            if (read_actual_servo_position(dynamixel_servos, 18, &measured_position[0][0]) < 0) {
+
+            // A) Read the actual positions from the servos
+            //    - Convert pulses to rad
+            //    - Compensate for geometry
+            if (dynamixel_get_long_parameter_multiple(dynamixel_servos, 18, XL430_CT_RAM_PRESENT_POSITION, &values[0][0]) != DNM_OK) {
                 LOG_ERROR("[ServoTask] Failed to read actual servo positions");
                 break;
             };
 
             for (int i=0; i<6; i++) {
-                compensate_geometry_from_servo(measured_position[i], servo_shared_state.actual_joint_angles[i]);
+                angles[i][0] = xl430_pulse_to_rad_centered(values[i][0]);
+                angles[i][1] = xl430_pulse_to_rad_centered(values[i][1]);
+                angles[i][2] = xl430_pulse_to_rad_centered(values[i][2]);
+                compensate(angles[i], joint_angles[i]);
             }
-            memcpy(servo_shared_state.target_joint_angles, servo_shared_state.actual_joint_angles, sizeof(servo_shared_state.target_joint_angles));
 
+            // B) Update the shared state to the current state of the hardware
+            for (int i=0; i<6; i++) {
+                for (int j=0; j<3; j++) {
+                    servo_shared_state.actual_joint_angles[i][j] = joint_angles[i][j];
+                    servo_shared_state.target_joint_angles[i][j] = joint_angles[i][j];
+                }
+            }
+
+            // C) Proceed to the next state
             state = SERVO_SYNC_TO_HW;
             break;
         case SERVO_SYNC_TO_HW:
+            // A) Convert the current targets to pulses
             for (int i=0; i<6; i++) {
-
-                dynamixel_servo_t leg_servos[3] = {
-                    dynamixel_servos[3 * i],
-                    dynamixel_servos[3 * i + 1],
-                    dynamixel_servos[3 * i + 2],
-                };
-                float32_t leg_servo_angles[3];
-
-                // Compensate angles for geometry
-                compensate_geometry_to_servo(servo_shared_state.target_joint_angles[i], leg_servo_angles);
-
-                write_next_servo_position(leg_servos, 3, leg_servo_angles);
+                uncompensate(servo_shared_state.target_joint_angles[i], angles[i]);
+                values[i][0] = xl430_rad_centered_to_pulse(angles[i][0]);
+                values[i][1] = xl430_rad_centered_to_pulse(angles[i][1]);
+                values[i][2] = xl430_rad_centered_to_pulse(angles[i][2]);
             }
+
+            // B) Write the goal position to the servos
+            if (dynamixel_set_long_parameter_multiple(dynamixel_servos, 18, XL430_CT_RAM_GOAL_POSITION, &values[0][0]) != DNM_OK) {
+                LOG_ERROR("[ServoTask] Failed to write target servo positions");
+            };
+
+            // C) Signal ready and proceed to the next state
             osEventFlagsSet(systemEventsHandle, EVT_SERVO_READY);
             state = SERVO_RUNNING;
             break;
         case SERVO_RUNNING: {
-            // A) Read the current angles from the servos into actual_position
-            const int res = read_actual_servo_position(dynamixel_servos, 18, &measured_position[0][0]);
-            if (res == 0) {
-                // We have a position so use it
+            // A) Read the actual positions from the servos
+            //    - Convert pulses to rad
+            //    - Compensate for geometry
+            if (dynamixel_get_long_parameter_multiple(dynamixel_servos, 18, XL430_CT_RAM_PRESENT_POSITION, &values[0][0]) == DNM_OK) {
                 for (int i=0; i<6; i++) {
-                    compensate_geometry_from_servo(measured_position[i], measured_compensated_position[i]);
+                    angles[i][0] = xl430_pulse_to_rad_centered(values[i][0]);
+                    angles[i][1] = xl430_pulse_to_rad_centered(values[i][1]);
+                    angles[i][2] = xl430_pulse_to_rad_centered(values[i][2]);
+                    compensate(angles[i], joint_angles[i]);
                 }
-
-                memcpy(actual_position, measured_compensated_position, sizeof(actual_position));
             } else {
-                // We use the last position we know
-                memcpy(actual_position, servo_shared_state.actual_joint_angles, sizeof(actual_position));
-            }
+                // Failed to read the hardware state, use what we currently have
+                LOG_WARN("[ServoTask] Failed to read actual servo positions, using last known state");
+                for (int i=0; i<6; i++) {
+                    joint_angles[i][0] = servo_shared_state.actual_joint_angles[i][0];
+                    joint_angles[i][1] = servo_shared_state.actual_joint_angles[i][1];
+                    joint_angles[i][2] = servo_shared_state.actual_joint_angles[i][2];
+                }
+            };
 
             // B) Interpolate toward target
-            // Apply deadband, error accumulation and step clamping
+            //    - Apply deadband
+            //    - Error accumulation
+            //    - Step clamping on velocity
+            //.   - Limits check
             uint32_t now = osKernelGetTickCount();
             TickType_t dt_ticks = now - last_ticks;
             last_ticks = now;
@@ -2382,11 +2389,10 @@ void StartServoTask(void *argument)
             dt_s = clampf(dt_s, 0.0005f, 0.05f); // avoid stalls & spikes
 
             float32_t max_step = SERVO_MAX_VELOCITY * dt_s;
-            uint8_t limit_alert = 0;
             for (int i=0; i<6; i++) {
                 for (int j=0; j<3; j++) {
                     // Determine the remaining movement for this control step
-                    float32_t error = servo_shared_state.target_joint_angles[i][j] - actual_position[i][j];
+                    float32_t error = servo_shared_state.target_joint_angles[i][j] - joint_angles[i][j];
 
                     // Step size with deadbanding and quantization
                     float32_t step = 0.0f;
@@ -2413,9 +2419,9 @@ void StartServoTask(void *argument)
 
                     last_velocity[i][j] = vel;
 
-                    commanded_position[i][j] = actual_position[i][j] + step;
+                    commanded_position[i][j] = joint_angles[i][j] + step;
 
-                    // Check motion limits
+                    // Perform a limit check
                     if (servo_shared_state.limit_alert_enabled) {
                         if (commanded_position[i][j] < r.leg[i].limits[j][0] || commanded_position[i][j] > r.leg[i].limits[j][1]) {
                             LOG_ERROR("Limit alert triggered, leg %d, axis %d", i, j);
@@ -2423,25 +2429,37 @@ void StartServoTask(void *argument)
                             limit_alert = 1;
                         }
                     }
-
                 }
-                compensate_geometry_to_servo(commanded_position[i], commanded_uncompensated_position[i]);
             }
 
             if (limit_alert && servo_shared_state.limit_alert_enabled) {
+                // TODO instead of error send a signal to the controller to recover
                 state = SERVO_ERROR;
-                continue;
+                break;
             }
 
-            // C) Write the new target positions to the servos
-            write_next_servo_position(dynamixel_servos, 18, &commanded_uncompensated_position[0][0]);
+            // C) Write the goal position to the servos
+            //    - Uncompensate angles
+            //    - Convert to pulses
+            //    - Write to servos
+            for (int i=0; i<6; i++) {
+                uncompensate(commanded_position[i], angles[i]);
+                values[i][0] = xl430_rad_centered_to_pulse(angles[i][0]);
+                values[i][1] = xl430_rad_centered_to_pulse(angles[i][1]);
+                values[i][2] = xl430_rad_centered_to_pulse(angles[i][2]);
+            }
+
+            if (dynamixel_set_long_parameter_multiple(dynamixel_servos, 18, XL430_CT_RAM_GOAL_POSITION, &values[0][0]) != DNM_OK) {
+                LOG_ERROR("[ServoTask] Failed to write target servo positions");
+            };
 
             // D) Blend the actual readings into the shared state
             for (int i=0; i<6; i++) {
                 for (int j=0; j<3; j++) {
                     // Blend measured position into the shared state for the controller
-                    servo_shared_state.actual_joint_angles[i][j] =
-                        (1 - ALPHA) * servo_shared_state.actual_joint_angles[i][j] + ALPHA * actual_position[i][j];
+                    // servo_shared_state.actual_joint_angles[i][j] =
+                    //     (1 - ALPHA) * servo_shared_state.actual_joint_angles[i][j] + ALPHA * joint_angles[i][j];
+                    servo_shared_state.actual_joint_angles[i][j] = commanded_position[i][j];
                 }
             }
 

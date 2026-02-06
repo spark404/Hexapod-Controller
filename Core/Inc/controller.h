@@ -1,4 +1,4 @@
-/*
+    /*
  * SPDX-FileCopyrightText: 2025 Hugo Trippaers <hugo@trippaers.nl>
  *
  * SPDX-License-Identifier: Apache-2.0
