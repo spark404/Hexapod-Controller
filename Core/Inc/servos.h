@@ -34,8 +34,16 @@ typedef enum {
 float32_t xl430_pulse_to_rad_centered(const uint16_t pulse);
 uint16_t xl430_rad_centered_to_pulse(const float32_t rad);
 
-void compensate(const float src[3], float dst[3]);
-void uncompensate(const float src[3], float dst[3]);
+void compensate(const float32_t src[3], float32_t dst[3]);
+void uncompensate(const float32_t src[3], float32_t dst[3]);
+void servo_copy_target_joint_angles(float32_t dst[6][3], const servo_shared_state_t *state);
+void servo_copy_actual_joint_angles(float32_t dst[6][3], const servo_shared_state_t *state);
+void servo_set_target_joint_angles(servo_shared_state_t *state, float32_t src[6][3]);
+void servo_set_actual_joint_angles(servo_shared_state_t *state, float32_t src[6][3]);
+void servo_set_actual_and_target_joint_angles(servo_shared_state_t *state, float32_t src[6][3]);
+void servo_get_flags(const servo_shared_state_t *state, bool *request_powerdown, bool *limit_alert_enabled);
+void servo_set_request_powerdown(servo_shared_state_t *state, bool request_powerdown);
+void servo_set_limit_alert_enabled(servo_shared_state_t *state, bool limit_alert_enabled);
 
 
 #endif //SERVOS_H

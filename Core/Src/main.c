@@ -1324,11 +1324,11 @@ static void stm32_state_change_cb(
 
     switch (from) {
         case CTRL_POWERDOWN:
-            servo_shared_state.request_powerdown = false;
+            servo_set_request_powerdown(&servo_shared_state, false);
             break;
         case CTRL_WALKING:
         case CTRL_ROTATING:
-            servo_shared_state.limit_alert_enabled = false;
+            servo_set_limit_alert_enabled(&servo_shared_state, false);
             break;
         default:
             break;
@@ -1338,7 +1338,7 @@ static void stm32_state_change_cb(
         case CTRL_POWERDOWN:
             rgb_led_set_color(RGB_LED_COLOR_MAGENTA);
             rgb_led_blink(500, 0.5f);
-            servo_shared_state.request_powerdown = true;
+            servo_set_request_powerdown(&servo_shared_state, true);
             break;
         case CTRL_STANDUP:
             rgb_led_set_color(RGB_LED_COLOR_CYAN);
@@ -1351,12 +1351,12 @@ static void stm32_state_change_cb(
         case CTRL_WALKING:
             rgb_led_set_color(RGB_LED_COLOR_BLUE);
             rgb_led_blink(500, 0.5f);
-            servo_shared_state.limit_alert_enabled = true;
+            servo_set_limit_alert_enabled(&servo_shared_state, true);
             break;
         case CTRL_ROTATING:
             rgb_led_set_color(RGB_LED_COLOR_YELLOW);
             rgb_led_blink(500, 0.5f);
-            servo_shared_state.limit_alert_enabled = true;
+            servo_set_limit_alert_enabled(&servo_shared_state, true);
             break;
         default:
             break;
@@ -2147,8 +2147,10 @@ void StartUsartTxTask(void *argument)
         };
 
         // Reset for next interation
+        taskENTER_CRITICAL();
         dma_rx_read_idx = 0;
         huart->hdmarx->Instance->NDTR = DMA_RX_BUF_SIZE;
+        taskEXIT_CRITICAL();
 
         // Enable Transmit
         if (HAL_HalfDuplex_EnableTransmitter(huart) != HAL_OK) {
@@ -2208,6 +2210,8 @@ void StartControlTask(void *argument)
     uint32_t tick_count = osKernelGetTickCount();
 
     controller_ctx_t controller_ctx;
+    float32_t actual_joint_angles[6][3] = {{0.0f}};
+    float32_t target_joint_angles[6][3] = {{0.0f}};
     controller_command_t cmd = {
         .velocity = 0,
         .heading = 0,
@@ -2241,12 +2245,13 @@ void StartControlTask(void *argument)
       cmd.height = updated_height;
 
       // Update the actual from the shared state
+      servo_copy_actual_joint_angles(actual_joint_angles, &servo_shared_state);
       for (int i = 0; i < 6; i++) {
           struct leg_state *current_leg_state = &controller_ctx.robot.leg_state[i];
 
-          current_leg_state->actual_joint_angles[0] = servo_shared_state.actual_joint_angles[i][0];
-          current_leg_state->actual_joint_angles[1] = servo_shared_state.actual_joint_angles[i][1];
-          current_leg_state->actual_joint_angles[2] = servo_shared_state.actual_joint_angles[i][2];
+          current_leg_state->actual_joint_angles[0] = actual_joint_angles[i][0];
+          current_leg_state->actual_joint_angles[1] = actual_joint_angles[i][1];
+          current_leg_state->actual_joint_angles[2] = actual_joint_angles[i][2];
       }
 
       controller_update(&controller_ctx, &attitude, &cmd, dt_s);
@@ -2255,10 +2260,11 @@ void StartControlTask(void *argument)
       for (int i = 0; i < 6; i++) {
           struct leg_state *current_leg_state = &controller_ctx.robot.leg_state[i];
 
-          servo_shared_state.target_joint_angles[i][0] = current_leg_state->next_joint_angles[0];
-          servo_shared_state.target_joint_angles[i][1] = current_leg_state->next_joint_angles[1];
-          servo_shared_state.target_joint_angles[i][2] = current_leg_state->next_joint_angles[2];
+          target_joint_angles[i][0] = current_leg_state->next_joint_angles[0];
+          target_joint_angles[i][1] = current_leg_state->next_joint_angles[1];
+          target_joint_angles[i][2] = current_leg_state->next_joint_angles[2];
       }
+      servo_set_target_joint_angles(&servo_shared_state, target_joint_angles);
 
       tick_count += CONTROL_LOOP_INTERVAL;
       osDelayUntil(tick_count);
@@ -2287,18 +2293,22 @@ void StartServoTask(void *argument)
     float32_t joint_angles[6][3] = {{ 0.0f }};
     float32_t last_velocity[6][3] = {{0.0f }};
     float32_t commanded_position[6][3] = {{0.0f}};
+    float32_t target_joint_angles[6][3] = {{0.0f}};
 
     int limit_alert = 0;
+    bool request_powerdown = false;
+    bool limit_alert_enabled = false;
 
   /* Infinite loop */
   for(;;)
   {
       limit_alert = 0;
 
-      if (servo_shared_state.request_powerdown && state != SERVO_IDLE) {
+      servo_get_flags(&servo_shared_state, &request_powerdown, &limit_alert_enabled);
+      if (request_powerdown && state != SERVO_IDLE) {
           state = SERVO_POWER_DOWN;
       }
-      if (!servo_shared_state.request_powerdown && state == SERVO_IDLE) {
+      if (!request_powerdown && state == SERVO_IDLE) {
           state = SERVO_POWER_UP;
       }
 
@@ -2328,20 +2338,16 @@ void StartServoTask(void *argument)
             }
 
             // B) Update the shared state to the current state of the hardware
-            for (int i=0; i<6; i++) {
-                for (int j=0; j<3; j++) {
-                    servo_shared_state.actual_joint_angles[i][j] = joint_angles[i][j];
-                    servo_shared_state.target_joint_angles[i][j] = joint_angles[i][j];
-                }
-            }
+            servo_set_actual_and_target_joint_angles(&servo_shared_state, joint_angles);
 
             // C) Proceed to the next state
             state = SERVO_SYNC_TO_HW;
             break;
         case SERVO_SYNC_TO_HW:
             // A) Convert the current targets to pulses
+            servo_copy_target_joint_angles(target_joint_angles, &servo_shared_state);
             for (int i=0; i<6; i++) {
-                uncompensate(servo_shared_state.target_joint_angles[i], angles[i]);
+                uncompensate(target_joint_angles[i], angles[i]);
                 values[i][0] = xl430_rad_centered_to_pulse(angles[i][0]);
                 values[i][1] = xl430_rad_centered_to_pulse(angles[i][1]);
                 values[i][2] = xl430_rad_centered_to_pulse(angles[i][2]);
@@ -2357,6 +2363,9 @@ void StartServoTask(void *argument)
             state = SERVO_RUNNING;
             break;
         case SERVO_RUNNING: {
+            // Snapshot controller targets to avoid torn reads during updates
+            servo_copy_target_joint_angles(target_joint_angles, &servo_shared_state);
+
             // A) Read the actual positions from the servos
             //    - Convert pulses to rad
             //    - Compensate for geometry
@@ -2370,11 +2379,7 @@ void StartServoTask(void *argument)
             } else {
                 // Failed to read the hardware state, use what we currently have
                 LOG_WARN("[ServoTask] Failed to read actual servo positions, using last known state");
-                for (int i=0; i<6; i++) {
-                    joint_angles[i][0] = servo_shared_state.actual_joint_angles[i][0];
-                    joint_angles[i][1] = servo_shared_state.actual_joint_angles[i][1];
-                    joint_angles[i][2] = servo_shared_state.actual_joint_angles[i][2];
-                }
+                servo_copy_actual_joint_angles(joint_angles, &servo_shared_state);
             };
 
             // B) Interpolate toward target
@@ -2392,7 +2397,7 @@ void StartServoTask(void *argument)
             for (int i=0; i<6; i++) {
                 for (int j=0; j<3; j++) {
                     // Determine the remaining movement for this control step
-                    float32_t error = servo_shared_state.target_joint_angles[i][j] - joint_angles[i][j];
+                    float32_t error = target_joint_angles[i][j] - joint_angles[i][j];
 
                     // Step size with deadbanding and quantization
                     float32_t step = 0.0f;
@@ -2422,7 +2427,7 @@ void StartServoTask(void *argument)
                     commanded_position[i][j] = joint_angles[i][j] + step;
 
                     // Perform a limit check
-                    if (servo_shared_state.limit_alert_enabled) {
+                    if (limit_alert_enabled) {
                         if (commanded_position[i][j] < r.leg[i].limits[j][0] || commanded_position[i][j] > r.leg[i].limits[j][1]) {
                             LOG_ERROR("Limit alert triggered, leg %d, axis %d", i, j);
                             LOG_ERROR("Calculated value %5.2f, limits %5.2f, %5.2f", commanded_position[i][j], r.leg[i].limits[j][0], r.leg[i].limits[j][1]);
@@ -2432,7 +2437,7 @@ void StartServoTask(void *argument)
                 }
             }
 
-            if (limit_alert && servo_shared_state.limit_alert_enabled) {
+            if (limit_alert && limit_alert_enabled) {
                 // TODO instead of error send a signal to the controller to recover
                 state = SERVO_ERROR;
                 break;
@@ -2453,15 +2458,8 @@ void StartServoTask(void *argument)
                 LOG_ERROR("[ServoTask] Failed to write target servo positions");
             };
 
-            // D) Blend the actual readings into the shared state
-            for (int i=0; i<6; i++) {
-                for (int j=0; j<3; j++) {
-                    // Blend measured position into the shared state for the controller
-                    // servo_shared_state.actual_joint_angles[i][j] =
-                    //     (1 - ALPHA) * servo_shared_state.actual_joint_angles[i][j] + ALPHA * joint_angles[i][j];
-                    servo_shared_state.actual_joint_angles[i][j] = commanded_position[i][j];
-                }
-            }
+            // D) Write the actual readings into the shared state
+            servo_set_actual_joint_angles(&servo_shared_state, joint_angles);
 
             break;
         }
