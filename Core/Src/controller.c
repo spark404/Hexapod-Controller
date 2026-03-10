@@ -270,6 +270,11 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
             matrix_3d_vec_transform(&current_leg_state->coxa_mat_inv, p_next_in_body_frame, p_next_in_coxa_frame);
             inverse_kinematics(origin, p_next_in_coxa_frame, current_leg_state->next_joint_angles);
 
+            float32_t p_target_in_coxa_frame[3];
+            float32_t target_joint_angles[3];
+            matrix_3d_vec_transform(&current_leg_state->coxa_mat_inv, p_target_in_body_frame, p_target_in_coxa_frame);
+            inverse_kinematics(origin, p_target_in_coxa_frame, target_joint_angles);
+
             if (distance_remaining > CTRL_CLOSE_THRESH) {
                 ready = 0;
             };
@@ -278,6 +283,10 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
                 LOG_DEBUG("C: %.3f, %.3f, %.3f; T: %.3f, %.3f, %.3f",
                     p_current_in_body_frame[0], p_current_in_body_frame[1], p_current_in_body_frame[2],
                     p_target_in_body_frame[0], p_target_in_body_frame[1], p_target_in_body_frame[2]);
+                LOG_DEBUG("A: %.3f, %.3f, %.3f; N: %.3f, %.3f, %.3f; T: %.3f, %.3f, %.3f",
+                    current_leg_state->actual_joint_angles[0], current_leg_state->actual_joint_angles[1], current_leg_state->actual_joint_angles[2],
+                    current_leg_state->next_joint_angles[0], current_leg_state->next_joint_angles[1], current_leg_state->next_joint_angles[2],
+                    target_joint_angles[0], target_joint_angles[1], target_joint_angles[2]);
             }
         }
 

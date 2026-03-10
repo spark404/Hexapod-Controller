@@ -40,7 +40,6 @@
 #include "ring_buffer.h"
 
 #include "dynamixel/dynamixel.h"
-#include "dynamixel_ll_uart.h"
 
 #include "hexapodmath/additional_functions.h"
 
@@ -111,8 +110,8 @@ MATRIX(M, 4)
 
 #define HZ_TO_INTERVAL(hz) (1000 / (uint32_t)(hz))
 #define MAIN_LOOP_INTERVAL HZ_TO_INTERVAL(1)
-#define CONTROL_LOOP_INTERVAL HZ_TO_INTERVAL(50)
-#define SERVO_LOOP_INTERVAL HZ_TO_INTERVAL(100)
+#define CONTROL_LOOP_INTERVAL HZ_TO_INTERVAL(10)
+#define SERVO_LOOP_INTERVAL HZ_TO_INTERVAL(25)
 #define MAG_LOOP_INTERVAL HZ_TO_INTERVAL(5)
 
 #define DMA_RX_BUF_SIZE 1024 // Can handle 2.5 ms of data at 4 Mbps
@@ -271,7 +270,6 @@ bmi08_t bmi088;
 i2c_intf_ptr bno055_intf;
 bno055_tt bno055;
 
-dynamixel_ll_uart_context dynamixel_uart_context;
 dynamixel_bus_t dynamixel_bus;
 dynamixel_servo_t dynamixel_servos[3 * 6];
 
@@ -353,8 +351,8 @@ void stm32_bno055_delay_us(u32 period);
 ssize_t usart_read(uint8_t *dst, size_t len, TickType_t timeout);
 ssize_t usart_write(const uint8_t *src, size_t len, TickType_t timeout);
 
-ssize_t dynamixel_read_uart_dma_new(uint8_t *rxBuffer, size_t size, void *pvContext);
-ssize_t dynamixel_write_uart_dma_new(const uint8_t *txBuffer, size_t size, void *pvContext);
+ssize_t dynamixel_read_uart_dma(uint8_t *rxBuffer, size_t size, void *pvContext);
+ssize_t dynamixel_write_uart_dma(const uint8_t *txBuffer, size_t size, void *pvContext);
 
 
 void PERIF_BMI088_Init();
@@ -1389,20 +1387,32 @@ static void uart_rx_drain_dma(void)
     }
 }
 
-ssize_t dynamixel_read_uart_dma_new(
+static void uart_rx_flush_dma(void)
+{
+    taskENTER_CRITICAL();
+    ringbuf_reset(&rx_ring);
+    taskEXIT_CRITICAL();
+}
+
+ssize_t dynamixel_read_uart_dma(
     uint8_t *rxBuffer,
     size_t size,
     void *pvContext) {
     UNUSED(pvContext);
-    return usart_read(rxBuffer, size, pdMS_TO_TICKS(2));
+    return usart_read(rxBuffer, size, pdMS_TO_TICKS(10));
 }
 
-ssize_t dynamixel_write_uart_dma_new(
+ssize_t dynamixel_write_uart_dma(
     const uint8_t *txBuffer,
     size_t size,
     void *pvContext) {
     UNUSED(pvContext);
-    return usart_write(txBuffer, size, pdMS_TO_TICKS(3));
+    return usart_write(txBuffer, size, pdMS_TO_TICKS(10));
+}
+
+void dynamixel_flush_uart_dma(void *pvContext) {
+    UNUSED(pvContext);
+    uart_rx_flush_dma();
 }
 
 /**
@@ -1575,16 +1585,8 @@ void PERIF_BNO055_Init() {
  * On error jump to Error_Handler
  */
 void PERIF_Dynamixel_Init() {
-    dynamixel_uart_context.huart = &huart6;
-    dynamixel_uart_context.callerThread = osThreadGetId();
-
-    if (dynamixel_uart_context.callerThread == NULL) {
-        LOG_ERROR("dynamixel_uart_context.callerThread is NULL");
-        Error_Handler();
-    }
-
     DYNAMIXEL_ERROR_CHECK(
-        dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma_new, &dynamixel_write_uart_dma_new, NULL, &dynamixel_uart_context
+        dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, NULL, NULL
         ));
     int error_count = 0;
     for (int i = 0; i < 6; i++) {
@@ -2318,15 +2320,17 @@ void StartServoTask(void *argument)
             PERIF_Dynamixel_Configure();
             state = SERVO_POWER_UP;
             break;
-        case SERVO_SYNC_FROM_HW:
+        case SERVO_SYNC_FROM_HW: {
             // We use the fact that the dynamixel servo list is ordered
             // similar to our [6][3] structures but flattened
 
             // A) Read the actual positions from the servos
             //    - Convert pulses to rad
             //    - Compensate for geometry
-            if (dynamixel_get_long_parameter_multiple(dynamixel_servos, 18, XL430_CT_RAM_PRESENT_POSITION, &values[0][0]) != DNM_OK) {
-                LOG_ERROR("[ServoTask] Failed to read actual servo positions");
+            const dynamixel_result_t res = dynamixel_get_long_parameter_multiple(
+                dynamixel_servos, 18, XL430_CT_RAM_PRESENT_POSITION, &values[0][0]);
+            if (res != DNM_OK) {
+                LOG_ERROR("[ServoTask] Failed to read actual servo positions [%d]", res);
                 break;
             };
 
@@ -2343,6 +2347,7 @@ void StartServoTask(void *argument)
             // C) Proceed to the next state
             state = SERVO_SYNC_TO_HW;
             break;
+        }
         case SERVO_SYNC_TO_HW:
             // A) Convert the current targets to pulses
             servo_copy_target_joint_angles(target_joint_angles, &servo_shared_state);
@@ -2369,7 +2374,9 @@ void StartServoTask(void *argument)
             // A) Read the actual positions from the servos
             //    - Convert pulses to rad
             //    - Compensate for geometry
-            if (dynamixel_get_long_parameter_multiple(dynamixel_servos, 18, XL430_CT_RAM_PRESENT_POSITION, &values[0][0]) == DNM_OK) {
+            dynamixel_result_t res = dynamixel_get_long_parameter_multiple(
+                dynamixel_servos, 18, XL430_CT_RAM_PRESENT_POSITION, &values[0][0]);
+            if (res == DNM_OK) {
                 for (int i=0; i<6; i++) {
                     angles[i][0] = xl430_pulse_to_rad_centered(values[i][0]);
                     angles[i][1] = xl430_pulse_to_rad_centered(values[i][1]);
@@ -2378,8 +2385,28 @@ void StartServoTask(void *argument)
                 }
             } else {
                 // Failed to read the hardware state, use what we currently have
-                LOG_WARN("[ServoTask] Failed to read actual servo positions, using last known state");
+                LOG_WARN("[ServoTask] Failed to read actual servo positions (error %d), using last known state", res);
                 servo_copy_actual_joint_angles(joint_angles, &servo_shared_state);
+
+                // Lets test this, delay until we are sure all servos had their chance to send data.
+                osDelayUntil(tick_count + 5);
+                // Stop DMA receive
+                if (HAL_UART_DMAStop(&huart6) != HAL_OK) {
+                    LOG_ERROR("[USARTTX] Failed to stop receiver");
+                };
+
+                // Reset for next interation
+                taskENTER_CRITICAL();
+                dma_rx_read_idx = 0;
+                huart6.hdmarx->Instance->NDTR = DMA_RX_BUF_SIZE;
+                taskEXIT_CRITICAL();
+
+                dynamixel_bus_flush(dynamixel_servos[0].bus);
+
+                // Start the receiver
+                if (HAL_UART_Receive_DMA(&huart6, dma_rx_buf, DMA_RX_BUF_SIZE) != HAL_OK) {
+                    LOG_ERROR("[USARTTX] Failed to start receiver");
+                };
             };
 
             // B) Interpolate toward target

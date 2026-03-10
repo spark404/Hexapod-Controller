@@ -70,7 +70,6 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         # Add user sources here
         Core/Src/calculator.c
-        Core/Src/dynamixel_ll_uart.c
         Core/Src/servos.c
         Core/Src/rgb_led.c
         Core/Src/controller.c
