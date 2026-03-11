@@ -123,10 +123,10 @@ MATRIX(M, 4)
 #define RX_DMA_ERROR 0x8
 #define TX_DMA_TC 0x01
 
-#define SERVO_MAX_VELOCITY 4.0f
-#define SERVO_DEADBAND_RAD 0.004f   // ≈ 0.23°
-#define SERVO_MIN_STEP_RAD 0.006f   // ≈ 0.34°
-#define SERVO_MAX_ACCELERATION  30.0f   // rad/s²
+#define SERVO_MAX_VELOCITY      8.0f    // rad/s
+#define SERVO_MAX_ACCELERATION  40.0f   // rad/s²
+#define SERVO_DEADBAND_RAD      0.002f  // ≈ 0.11°
+#define SERVO_MIN_STEP_RAD      0.003f  // ≈ 0.17°
 
 // Blend rate for merging actual measurements into state
 #define ALPHA 1.0f
@@ -243,6 +243,11 @@ const osMutexAttr_t spiMutex_attributes = {
 osMutexId_t usartMutexHandle;
 const osMutexAttr_t usartMutex_attributes = {
   .name = "usartMutex"
+};
+/* Definitions for uart_dma_mutex */
+osMutexId_t uart_dma_mutexHandle;
+const osMutexAttr_t uart_dma_mutex_attributes = {
+  .name = "uart_dma_mutex"
 };
 /* Definitions for usart_rx_sem */
 osSemaphoreId_t usart_rx_semHandle;
@@ -441,6 +446,9 @@ int main(void)
 
   /* creation of usartMutex */
   usartMutexHandle = osMutexNew(&usartMutex_attributes);
+
+  /* creation of uart_dma_mutex */
+  uart_dma_mutexHandle = osMutexNew(&uart_dma_mutex_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
     /* add mutexes, ... */
@@ -1394,6 +1402,34 @@ static void uart_rx_flush_dma(void)
     taskEXIT_CRITICAL();
 }
 
+static void uart_rx_reset_dma(void)
+{
+    // Protect DMA reconfiguration
+    osMutexAcquire(uart_dma_mutexHandle, osWaitForever);
+
+    // Stop DMA receive
+    if (HAL_UART_DMAStop(&huart6) != HAL_OK) {
+        LOG_ERROR("[UART] Failed to stop DMA receiver");
+    }
+
+    // Reset indices
+    taskENTER_CRITICAL();
+    dma_rx_read_idx = 0;
+    huart6.hdmarx->Instance->NDTR = DMA_RX_BUF_SIZE;
+    taskEXIT_CRITICAL();
+
+    // Flush the dynamixel bus
+    dynamixel_bus_flush(dynamixel_servos[0].bus);
+
+    // Restart DMA receiver
+    HAL_HalfDuplex_EnableReceiver(&huart6);
+    if (HAL_UART_Receive_DMA(&huart6, dma_rx_buf, DMA_RX_BUF_SIZE) != HAL_OK) {
+        LOG_ERROR("[UART] Failed to restart DMA receiver");
+    }
+
+    osMutexRelease(uart_dma_mutexHandle);
+}
+
 ssize_t dynamixel_read_uart_dma(
     uint8_t *rxBuffer,
     size_t size,
@@ -2143,6 +2179,9 @@ void StartUsartTxTask(void *argument)
     {
         osMessageQueueGet(usart_tx_queueHandle, &msg, NULL, osWaitForever);
 
+        // Acquire DMA mutex before stopping/starting DMA
+        osMutexAcquire(uart_dma_mutexHandle, osWaitForever);
+
         // Stop DMA receive
         if (HAL_UART_DMAStop(huart) != HAL_OK) {
             LOG_ERROR("[USARTTX] Failed to stop receiver");
@@ -2184,6 +2223,9 @@ void StartUsartTxTask(void *argument)
         if (HAL_UART_Receive_DMA(huart, dma_rx_buf, DMA_RX_BUF_SIZE) != HAL_OK) {
             LOG_ERROR("[USARTTX] Failed to start receiver");
         };
+
+        // Release DMA mutex after restart complete
+        osMutexRelease(uart_dma_mutexHandle);
 
         // Signal the write that transfer is complete
         osSemaphoreRelease(usart_tx_semHandle);
@@ -2384,29 +2426,16 @@ void StartServoTask(void *argument)
                     compensate(angles[i], joint_angles[i]);
                 }
             } else {
-                // Failed to read the hardware state, use what we currently have
-                LOG_WARN("[ServoTask] Failed to read actual servo positions (error %d), using last known state", res);
+                // Failed to read the hardware state, use last known state
+                LOG_WARN("[ServoTask] Failed to read servo positions (error %d), resetting UART", res);
                 servo_copy_actual_joint_angles(joint_angles, &servo_shared_state);
 
-                // Lets test this, delay until we are sure all servos had their chance to send data.
-                osDelayUntil(tick_count + 5);
-                // Stop DMA receive
-                if (HAL_UART_DMAStop(&huart6) != HAL_OK) {
-                    LOG_ERROR("[USARTTX] Failed to stop receiver");
-                };
+                // Wait 5ms for any pending servo responses from the BULK_READ/SYNC_READ
+                // to arrive on the bus (18 servos may still be transmitting)
+                osDelay(5);
 
-                // Reset for next interation
-                taskENTER_CRITICAL();
-                dma_rx_read_idx = 0;
-                huart6.hdmarx->Instance->NDTR = DMA_RX_BUF_SIZE;
-                taskEXIT_CRITICAL();
-
-                dynamixel_bus_flush(dynamixel_servos[0].bus);
-
-                // Start the receiver
-                if (HAL_UART_Receive_DMA(&huart6, dma_rx_buf, DMA_RX_BUF_SIZE) != HAL_OK) {
-                    LOG_ERROR("[USARTTX] Failed to start receiver");
-                };
+                // Perform DMA recovery (mutex-protected)
+                uart_rx_reset_dma();
             };
 
             // B) Interpolate toward target
