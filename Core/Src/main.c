@@ -47,7 +47,6 @@
 #include "calculator.h"
 #include "servos.h"
 #include "log.h"
-#include "semphr.h"
 #include "dynamixel/protocol.h"
 #include "controller.h"
 #include "controller_math.h"
@@ -173,35 +172,35 @@ osThreadId_t gyroTaskHandle;
 const osThreadAttr_t gyroTask_attributes = {
   .name = "gyroTask",
   .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityHigh,
+  .priority = (osPriority_t) osPriorityHigh3,
 };
 /* Definitions for accelTask */
 osThreadId_t accelTaskHandle;
 const osThreadAttr_t accelTask_attributes = {
   .name = "accelTask",
   .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+  .priority = (osPriority_t) osPriorityHigh3,
 };
 /* Definitions for magTask */
 osThreadId_t magTaskHandle;
 const osThreadAttr_t magTask_attributes = {
   .name = "magTask",
   .stack_size = 512 * 4,
-  .priority = (osPriority_t) osPriorityBelowNormal,
+  .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for ekfTask */
 osThreadId_t ekfTaskHandle;
 const osThreadAttr_t ekfTask_attributes = {
   .name = "ekfTask",
   .stack_size = 2048 * 4,
-  .priority = (osPriority_t) osPriorityAboveNormal,
+  .priority = (osPriority_t) osPriorityHigh1,
 };
 /* Definitions for usartRxTask */
 osThreadId_t usartRxTaskHandle;
 const osThreadAttr_t usartRxTask_attributes = {
   .name = "usartRxTask",
   .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+  .priority = (osPriority_t) osPriorityHigh4,
 };
 /* Definitions for usartTxTask */
 osThreadId_t usartTxTaskHandle;
@@ -222,7 +221,14 @@ osThreadId_t servoTaskHandle;
 const osThreadAttr_t servoTask_attributes = {
   .name = "servoTask",
   .stack_size = 1600 * 4,
-  .priority = (osPriority_t) osPriorityAboveNormal,
+  .priority = (osPriority_t) osPriorityHigh2,
+};
+/* Definitions for rgbLedTask */
+osThreadId_t rgbLedTaskHandle;
+const osThreadAttr_t rgbLedTask_attributes = {
+  .name = "rgbLedTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal,
 };
 /* Definitions for ekf_queue */
 osMessageQueueId_t ekf_queueHandle;
@@ -233,6 +239,11 @@ const osMessageQueueAttr_t ekf_queue_attributes = {
 osMessageQueueId_t usart_tx_queueHandle;
 const osMessageQueueAttr_t usart_tx_queue_attributes = {
   .name = "usart_tx_queue"
+};
+/* Definitions for rgb_led_queue */
+osMessageQueueId_t rgb_led_queueHandle;
+const osMessageQueueAttr_t rgb_led_queue_attributes = {
+  .name = "rgb_led_queue"
 };
 /* Definitions for spiMutex */
 osMutexId_t spiMutexHandle;
@@ -331,6 +342,7 @@ void StartUsartRxTask(void *argument);
 void StartUsartTxTask(void *argument);
 void StartControlTask(void *argument);
 void StartServoTask(void *argument);
+void rgb_led_task(void *argument);
 
 /* USER CODE BEGIN PFP */
 int __io_putchar(int ch);
@@ -353,18 +365,32 @@ int8_t stm32_bno055_bus_read(uint8_t dev_addr, uint8_t reg_addr, uint8_t *reg_da
 
 void stm32_bno055_delay_us(u32 period);
 
-ssize_t usart_read(uint8_t *dst, size_t len, TickType_t timeout);
-ssize_t usart_write(const uint8_t *src, size_t len, TickType_t timeout);
+ssize_t usart_read(uint8_t *dst, size_t len, uint32_t timeout);
+ssize_t usart_write(const uint8_t *src, size_t len, uint32_t timeout);
 
 ssize_t dynamixel_read_uart_dma(uint8_t *rxBuffer, size_t size, void *pvContext);
 ssize_t dynamixel_write_uart_dma(const uint8_t *txBuffer, size_t size, void *pvContext);
 
+void PERIF_BMI088_Init(void);
+void PERIF_BMM350_Init(void);
+void PERIF_BNO055_Init(void);
+void PERIF_Dynamixel_Init(void);
+void PERIF_Dynamixel_Configure(void);
 
-void PERIF_BMI088_Init();
-void PERIF_BMM350_Init();
-void PERIF_BNO055_Init();
-void PERIF_Dynamixel_Init();
-void PERIF_Dynamixel_Configure();
+static float32_t stm32_bmi08a_scale_data(int16_t raw, uint8_t accel_range);
+static float32_t stm32_bmi08g_scale_data(int16_t raw, uint8_t gyro_range);
+static void stm32_bmi08a_sensor_to_ned(const float32_t sensor[3], float32_t ned[3]);
+static void stm32_bmi08g_sensor_to_ned(const float32_t sensor[3], float32_t ned[3]);
+static void stm32_bmm350_sensor_to_ned(const float32_t sensor[3], float32_t ned[3]);
+
+void dynamixel_flush_uart_dma(void *pvContext);
+
+static size_t dma_rx_write_idx(void);
+static void uart_rx_drain_dma(void);
+static void uart_rx_flush_dma(void);
+static void uart_rx_reset_dma(void);
+
+static void stm32_state_change_cb(controller_ctx_t *ctx, controller_state_t from, controller_state_t to, void *user_data);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -427,9 +453,9 @@ int main(void)
     HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_RESET);
 
-    // PERIF_BMI088_Init();
-    // PERIF_BMM350_Init();
-    // PERIF_BNO055_Init();
+    PERIF_BMI088_Init();
+    PERIF_BMM350_Init();
+    PERIF_BNO055_Init();
 
     LOG_INFO("[Main] Initialisation complete");
     HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_SET);
@@ -475,6 +501,9 @@ int main(void)
   /* creation of usart_tx_queue */
   usart_tx_queueHandle = osMessageQueueNew (16, sizeof(tx_msg_t), &usart_tx_queue_attributes);
 
+  /* creation of rgb_led_queue */
+  rgb_led_queueHandle = osMessageQueueNew (8, sizeof(rgb_led_cmd_t), &rgb_led_queue_attributes);
+
   /* USER CODE BEGIN RTOS_QUEUES */
     /* add queues, ... */
   /* USER CODE END RTOS_QUEUES */
@@ -510,8 +539,11 @@ int main(void)
   /* creation of servoTask */
   servoTaskHandle = osThreadNew(StartServoTask, NULL, &servoTask_attributes);
 
+  /* creation of rgbLedTask */
+  rgbLedTaskHandle = osThreadNew(rgb_led_task, NULL, &rgbLedTask_attributes);
+
   /* USER CODE BEGIN RTOS_THREADS */
-    rgb_led_init();
+
   /* USER CODE END RTOS_THREADS */
 
   /* creation of systemEvents */
@@ -1457,7 +1489,7 @@ void dynamixel_flush_uart_dma(void *pvContext) {
  *
  * On error jump to Error_Handler
  */
-void PERIF_BMI088_Init() {
+void PERIF_BMI088_Init(void) {
     // Set the two chip select lines high
     HAL_GPIO_WritePin(SPI2_CS_ACC_GPIO_Port, SPI2_CS_ACC_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(SPI2_CS_GYR_GPIO_Port, SPI2_CS_GYR_Pin, GPIO_PIN_SET);
@@ -1572,7 +1604,7 @@ void PERIF_BMI088_Init() {
  *
  * On error jump to Error_Handler
  */
-void PERIF_BMM350_Init() {
+void PERIF_BMM350_Init(void) {
     /* Setup BMM350 */
     bmm350_intf.address = 0x14;
     bmm350_intf.hi2c = &hi2c2;
@@ -1597,7 +1629,7 @@ void PERIF_BMM350_Init() {
  *
  * On error jump to ErrorHandler
  */
-void PERIF_BNO055_Init() {
+void PERIF_BNO055_Init(void) {
     /* Setup BNO055 (on qwiic port) */
     bno055.bus_read = &stm32_bno055_bus_read;
     bno055.bus_write = &stm32_bno055_bus_write;
@@ -1620,7 +1652,7 @@ void PERIF_BNO055_Init() {
  *
  * On error jump to Error_Handler
  */
-void PERIF_Dynamixel_Init() {
+void PERIF_Dynamixel_Init(void) {
     DYNAMIXEL_ERROR_CHECK(
         dynamixel_bus_init(&dynamixel_bus, &dynamixel_read_uart_dma, &dynamixel_write_uart_dma, NULL, NULL
         ));
@@ -1655,7 +1687,7 @@ void PERIF_Dynamixel_Init() {
     }
 }
 
-void PERIF_Dynamixel_Configure() {
+void PERIF_Dynamixel_Configure(void) {
     for (int i = 0; i < 3 * 6; i++) {
         dynamixel_set_led(&dynamixel_servos[i], 1);
 
@@ -1693,10 +1725,12 @@ void StartDefaultTask(void *argument)
     uint32_t tick_count = osKernelGetTickCount();
 
     int clock = 0;
+    int stack_report_counter = 0;
 
     /* Infinite loop */
     for (;;) {
         clock++;
+        stack_report_counter++;
 
         // FIXME clock is a horrible way to print data periodically, do better.
         if (clock % (5 * 5) == 0) {
@@ -1708,6 +1742,38 @@ void StartDefaultTask(void *argument)
                 mag_snapshot[0], mag_snapshot[1], mag_snapshot[2]);
             LOG_INFO("[EKF] roll %5.2f, pitch %5.2f, yaw %5.2f",
                 ekf_out.roll, ekf_out.pitch, ekf_out.yaw);
+        }
+
+        if (stack_report_counter >= 60) {
+            stack_report_counter = 0;
+            LOG_INFO("--- Task Stack Usage Report (Remaining/Total) ---");
+            osThreadId_t tasks[] = {
+                defaultTaskHandle, spiSlaveTaskHandle, gyroTaskHandle,
+                accelTaskHandle, magTaskHandle, ekfTaskHandle,
+                usartRxTaskHandle, usartTxTaskHandle, controlTaskHandle,
+                servoTaskHandle, rgbLedTaskHandle
+            };
+            const char* task_names[] = {
+                "Default", "SPI Slave", "Gyro", "Accel", "Mag", "EKF",
+                "USART RX", "USART TX", "Control", "Servo", "RGB LED"
+            };
+            uint32_t stack_sizes[] = {
+                defaultTask_attributes.stack_size, spiSlaveTask_attributes.stack_size,
+                gyroTask_attributes.stack_size, accelTask_attributes.stack_size,
+                magTask_attributes.stack_size, ekfTask_attributes.stack_size,
+                usartRxTask_attributes.stack_size, usartTxTask_attributes.stack_size,
+                controlTask_attributes.stack_size, servoTask_attributes.stack_size,
+                rgbLedTask_attributes.stack_size
+            };
+
+            for (size_t i = 0; i < sizeof(tasks)/sizeof(tasks[0]); i++) {
+                if (tasks[i] != NULL) {
+                    uint32_t space = osThreadGetStackSpace(tasks[i]);
+                    LOG_INFO("[Stack] %-12s: %4lu / %4lu bytes free",
+                             task_names[i], space, stack_sizes[i]);
+                }
+            }
+            LOG_INFO("-------------------------------------------------");
         }
 
         // Schedule at fixed 5 Hz
@@ -2147,6 +2213,8 @@ void StartUsartRxTask(void *argument)
         Error_Handler();
     };
 
+    osEventFlagsSet(systemEventsHandle, EVT_UART_READY);
+
   /* Infinite loop */
     for(;;)
     {
@@ -2329,9 +2397,6 @@ void StartServoTask(void *argument)
     UNUSED(argument);
     servo_state_t state = SERVO_INIT;
 
-    uint32_t tick_count = osKernelGetTickCount();
-    uint32_t last_ticks = 0;
-
     uint32_t values[6][3] = {0};
     float32_t angles[6][3] = {{ 0.0f }};
     float32_t joint_angles[6][3] = {{ 0.0f }};
@@ -2342,6 +2407,11 @@ void StartServoTask(void *argument)
     int limit_alert = 0;
     bool request_powerdown = false;
     bool limit_alert_enabled = false;
+
+    osEventFlagsWait(systemEventsHandle, EVT_UART_READY, osFlagsWaitAll, osWaitForever);
+
+    uint32_t tick_count = osKernelGetTickCount();
+    uint32_t last_ticks = 0;
 
   /* Infinite loop */
   for(;;)
@@ -2552,6 +2622,25 @@ void StartServoTask(void *argument)
     osDelayUntil(tick_count);
   }
   /* USER CODE END StartServoTask */
+}
+
+/* USER CODE BEGIN Header_rgb_led_task */
+/**
+* @brief Function implementing the rgbLedTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_rgb_led_task */
+__weak void rgb_led_task(void *argument)
+{
+  /* USER CODE BEGIN rgb_led_task */
+    UNUSED(argument);
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END rgb_led_task */
 }
 
 /**

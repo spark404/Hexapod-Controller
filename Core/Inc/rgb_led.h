@@ -35,8 +35,27 @@ static const rgb_led_color_t RGB_LED_COLOR_MAGENTA = { 0xFF, 0x00, 0xFF };
 static const rgb_led_color_t RGB_LED_COLOR_YELLOW  = { 0xFF, 0xFF, 0x00 };
 static const rgb_led_color_t RGB_LED_COLOR_WHITE   = { 0xFF, 0xFF, 0xFF };
 
+/* Command queue */
+typedef enum {
+    RGB_LED_CMD_SET_COLOR,
+    RGB_LED_CMD_SET_MODE,
+    RGB_LED_CMD_SET_BLINK
+} rgb_led_cmd_type_t;
+
+typedef struct {
+    rgb_led_cmd_type_t type;
+    union {
+        rgb_led_color_t color;
+        rgb_led_mode_t  mode;
+        struct {
+            uint32_t period_ms;
+            float    duty_cycle;
+        } blink;
+    } data;
+} rgb_led_cmd_t;
+
 /* Initialize module, create task and queue */
-void rgb_led_init(void);
+void rgb_led_task(void *pvParameters);
 
 /* Control functions (thread-safe, use queue internally) */
 void rgb_led_set_color(rgb_led_color_t color);

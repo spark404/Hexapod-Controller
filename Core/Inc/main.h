@@ -60,6 +60,7 @@ void Error_Handler(void);
 #define EVT_EKF_READY 0x2
 #define EVT_CONTROLLER_READY 0x1
 #define EVT_SERVO_READY 0x4
+#define EVT_UART_READY 0x8
 #define SPI2_CS_ACC_Pin GPIO_PIN_0
 #define SPI2_CS_ACC_GPIO_Port GPIOC
 #define SPI2_CS_GYR_Pin GPIO_PIN_1

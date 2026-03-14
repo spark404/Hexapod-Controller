@@ -5,7 +5,12 @@
  */
 
 #include "rgb_led.h"
+
+#include "cmsis_os2.h"
 #include "stm32f4xx_hal.h"   // For GPIO / HAL functions
+
+/* ---- External Command Queue ---- */
+extern osMessageQueueId_t rgb_led_queueHandle;
 
 /* ---------- Hardware-specific section ---------- */
 /* Adjust these to your board: pins, ports, active level, etc. */
@@ -43,27 +48,6 @@ static void rgb_led_hw_set_color(rgb_led_color_t color)
 
 /* ---------- Internal command queue ---------- */
 
-typedef enum {
-    RGB_LED_CMD_SET_COLOR,
-    RGB_LED_CMD_SET_MODE,
-    RGB_LED_CMD_SET_BLINK
-} rgb_led_cmd_type_t;
-
-typedef struct {
-    rgb_led_cmd_type_t type;
-    union {
-        rgb_led_color_t color;
-        rgb_led_mode_t  mode;
-        struct {
-            uint32_t period_ms;
-            float    duty_cycle;
-        } blink;
-    } data;
-} rgb_led_cmd_t;
-
-static TaskHandle_t    s_rgb_led_task_handle = NULL;
-static QueueHandle_t   s_rgb_led_queue       = NULL;
-
 /* State owned by the task */
 static rgb_led_color_t s_current_color = { 0, 0, 0 };
 static rgb_led_mode_t  s_current_mode  = RGB_LED_MODE_OFF;
@@ -72,7 +56,7 @@ static float           s_blink_duty      = 0.5f;
 
 /* ---------- Task function ---------- */
 
-static void rgb_led_task(void *argument)
+void rgb_led_task(void *argument)
 {
     (void)argument;
 
@@ -84,7 +68,7 @@ static void rgb_led_task(void *argument)
 
         /* Non-blocking check for new commands; we still want periodic timing.
            You can use xQueueReceive with timeout if you prefer. */
-        if (xQueueReceive(s_rgb_led_queue, &cmd, 0) == pdPASS) {
+        if (osMessageQueueGet(rgb_led_queueHandle, &cmd, NULL, osWaitForever) == pdPASS) {
             switch (cmd.type) {
                 case RGB_LED_CMD_SET_COLOR:
                     s_current_color = cmd.data.color;
@@ -148,34 +132,10 @@ static void rgb_led_task(void *argument)
 
 /* ---------- Public API ---------- */
 
-void rgb_led_init(void)
-{
-    /* Create queue */
-    s_rgb_led_queue = xQueueCreate(8, sizeof(rgb_led_cmd_t));
-    if (s_rgb_led_queue == NULL) {
-        /* handle error, e.g. assert */
-        return;
-    }
-
-    /* Create task */
-    BaseType_t rc = xTaskCreate(
-        rgb_led_task,
-        "RGB_LED",
-        256,        /* stack size in words; tune as needed */
-        NULL,
-        tskIDLE_PRIORITY + 1,
-        &s_rgb_led_task_handle
-    );
-
-    if (rc != pdPASS) {
-        /* handle error, e.g. assert */
-    }
-}
-
 static void rgb_led_send_cmd(const rgb_led_cmd_t *cmd)
 {
-    if (s_rgb_led_queue != NULL) {
-        (void)xQueueSend(s_rgb_led_queue, cmd, portMAX_DELAY);
+    if (rgb_led_queueHandle != NULL) {
+        (void)osMessageQueuePut(rgb_led_queueHandle, cmd, 0, osWaitForever);
     }
 }
 

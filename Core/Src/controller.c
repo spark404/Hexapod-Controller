@@ -238,6 +238,17 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
 
         ctx->state = to;
 
+        // Initialize next_joint_angles from actual position when entering STANDUP
+        // to ensure smooth trajectory from current position
+        if (to == CTRL_STANDUP) {
+            for (int i = 0; i < 6; i++) {
+                struct leg_state *leg = &ctx->robot.leg_state[i];
+                leg->next_joint_angles[0] = leg->actual_joint_angles[0];
+                leg->next_joint_angles[1] = leg->actual_joint_angles[1];
+                leg->next_joint_angles[2] = leg->actual_joint_angles[2];
+            }
+        }
+
         if (ctx->on_state_change) {
             ctx->on_state_change(ctx, from, to, ctx->cb_user_data);
         }
@@ -257,8 +268,13 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
                 -CTRL_BODY_Z
             };
 
+            // Use last commanded position (next_joint_angles) instead of actual position
+            // to ensure smooth, continuous trajectory that the servo task can track
+            float32_t p_current_in_coxa_frame[3];
+            forward_kinematics(current_leg_state->next_joint_angles, p_current_in_coxa_frame);
+
             float32_t p_current_in_body_frame[3];
-            leg_current_position_body(current_leg_state, p_current_in_body_frame);
+            matrix_3d_vec_transform(&current_leg_state->coxa_mat, p_current_in_coxa_frame, p_current_in_body_frame);
 
             float32_t p_next_in_body_frame[3];
             float32_t p_next_in_coxa_frame[3];
@@ -442,13 +458,12 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
         }
 
         // 6) Execute paths
+        MATRIX4(T);
+        MATRIX4(Tinv);
         for (int i = 0; i < 6; i++) {
             struct leg_state *leg = &ctx->robot.leg_state[i];
 
-            MATRIX4(T);
             arm_mat_mult_f32(&Thexapod_body, &leg->coxa_mat, &T);
-
-            MATRIX4(Tinv);
             matrix_3d_invert(&T, &Tinv);
 
             float32_t movement_velocity = arm_vec_magnitude_f32(movement_vector, 3);
@@ -604,13 +619,12 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
         longest_path = fminf(longest_path, longest_lifted_path);
 
         // 6) Execute paths
+        MATRIX4(T);
+        MATRIX4(Tinv);
         for (int i = 0; i < 6; i++) {
             struct leg_state *leg = &ctx->robot.leg_state[i];
 
-            MATRIX4(T);
             arm_mat_mult_f32(&Thexapod_body, &leg->coxa_mat, &T);
-
-            MATRIX4(Tinv);
             matrix_3d_invert(&T, &Tinv);
 
             // if (longest_path < CTRL_CLOSE_THRESH) {
