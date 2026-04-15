@@ -110,7 +110,7 @@ MATRIX(M, 4)
 #define HZ_TO_INTERVAL(hz) (1000 / (uint32_t)(hz))
 #define MAIN_LOOP_INTERVAL HZ_TO_INTERVAL(1)
 #define CONTROL_LOOP_INTERVAL HZ_TO_INTERVAL(10)
-#define SERVO_LOOP_INTERVAL HZ_TO_INTERVAL(25)
+#define SERVO_LOOP_INTERVAL HZ_TO_INTERVAL(50)
 #define MAG_LOOP_INTERVAL HZ_TO_INTERVAL(5)
 
 #define DMA_RX_BUF_SIZE 1024 // Can handle 2.5 ms of data at 4 Mbps
@@ -455,7 +455,9 @@ int main(void)
 
     PERIF_BMI088_Init();
     PERIF_BMM350_Init();
-    PERIF_BNO055_Init();
+
+    // Connected via QWIIC
+    // PERIF_BNO055_Init();
 
     LOG_INFO("[Main] Initialisation complete");
     HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_SET);
@@ -973,13 +975,13 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, SPI2_CS_ACC_Pin|SPI2_CS_GYR_Pin|ST_LED_G_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, SPI2_CS_ACC_Pin|SPI2_CS_GYR_Pin|ST_LED_R_Pin|ST_LED_G_Pin
+                          |ST_LED_B_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, ST_LED_B_Pin|ST_LED_R_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pins : SPI2_CS_ACC_Pin SPI2_CS_GYR_Pin ST_LED_G_Pin */
-  GPIO_InitStruct.Pin = SPI2_CS_ACC_Pin|SPI2_CS_GYR_Pin|ST_LED_G_Pin;
+  /*Configure GPIO pins : SPI2_CS_ACC_Pin SPI2_CS_GYR_Pin ST_LED_R_Pin ST_LED_G_Pin
+                           ST_LED_B_Pin */
+  GPIO_InitStruct.Pin = SPI2_CS_ACC_Pin|SPI2_CS_GYR_Pin|ST_LED_R_Pin|ST_LED_G_Pin
+                          |ST_LED_B_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -989,13 +991,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pin = SPI2_INT_ACC_Pin|SPI2_INT_GYR_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : ST_LED_B_Pin ST_LED_R_Pin */
-  GPIO_InitStruct.Pin = ST_LED_B_Pin|ST_LED_R_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
@@ -1691,11 +1686,30 @@ void PERIF_Dynamixel_Configure(void) {
     for (int i = 0; i < 3 * 6; i++) {
         dynamixel_set_led(&dynamixel_servos[i], 1);
 
-        // Check and configure Return Delay Time
+        // Reduce Return Delay Time for faster response (0 * 2us = 0us)
+        // The default is usually 250 (500us), previous code set it to 20 (40us).
         uint8_t rdt;
-        dynamixel_get_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_RETURN_DELAY_TIME, &rdt);
-        if (rdt != 20) {
-            dynamixel_set_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_RETURN_DELAY_TIME, 20);
+        if (dynamixel_get_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_RETURN_DELAY_TIME, &rdt) == DNM_OK) {
+            if (rdt != 0) {
+                dynamixel_set_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_RETURN_DELAY_TIME, 0);
+            }
+        }
+
+        // Set Operating Mode to Position Control (3)
+        uint8_t op_mode;
+        if (dynamixel_get_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_OPERATING_MODE, &op_mode) == DNM_OK) {
+            if (op_mode != 3) {
+                dynamixel_set_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_OPERATING_MODE, 3);
+            }
+        }
+
+        // Configure Drive Mode (Normal, Forward, Time-based Profile)
+        // Bit 2: 0 for Velocity-based Profile, 1 for Time-based Profile
+        uint8_t drive_mode;
+        if (dynamixel_get_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_DRIVE_MODE, &drive_mode) == DNM_OK) {
+            if (drive_mode != 0) {
+                dynamixel_set_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_DRIVE_MODE, 0);
+            }
         }
 
         dynamixel_set_led(&dynamixel_servos[i], 0);

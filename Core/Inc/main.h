@@ -71,12 +71,12 @@ void Error_Handler(void);
 #define SPI2_INT_GYR_Pin GPIO_PIN_1
 #define SPI2_INT_GYR_GPIO_Port GPIOA
 #define SPI2_INT_GYR_EXTI_IRQn EXTI1_IRQn
-#define ST_LED_B_Pin GPIO_PIN_14
-#define ST_LED_B_GPIO_Port GPIOA
-#define ST_LED_R_Pin GPIO_PIN_15
-#define ST_LED_R_GPIO_Port GPIOA
-#define ST_LED_G_Pin GPIO_PIN_10
+#define ST_LED_R_Pin GPIO_PIN_10
+#define ST_LED_R_GPIO_Port GPIOC
+#define ST_LED_G_Pin GPIO_PIN_11
 #define ST_LED_G_GPIO_Port GPIOC
+#define ST_LED_B_Pin GPIO_PIN_12
+#define ST_LED_B_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */
 #define SPI1_TX_CPLT 0x01
