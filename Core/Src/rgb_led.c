@@ -137,7 +137,10 @@ void rgb_led_task(void *argument)
 static void rgb_led_send_cmd(const rgb_led_cmd_t *cmd)
 {
     if (rgb_led_queueHandle != NULL) {
-        (void)osMessageQueuePut(rgb_led_queueHandle, cmd, 0, osWaitForever);
+        /* Don't block the caller (controller callback) if the LED task is
+           wedged or behind -- the LED is cosmetic and a dropped state-change
+           frame is far less harmful than stalling the controller. */
+        (void)osMessageQueuePut(rgb_led_queueHandle, cmd, 0, 0);
     }
 }
 
