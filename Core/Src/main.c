@@ -207,7 +207,10 @@ osThreadId_t usartTxTaskHandle;
 const osThreadAttr_t usartTxTask_attributes = {
   .name = "usartTxTask",
   .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+  /* Must be at least as high as any periodic sensor task so that the TC -> RX
+   * rearm window in StartUsartTxTask cannot be preempted; otherwise the start
+   * of a Dynamixel reply can be lost and produce DNM_LL_ERR (68). */
+  .priority = (osPriority_t) osPriorityHigh3,
 };
 /* Definitions for controlTask */
 osThreadId_t controlTaskHandle;
