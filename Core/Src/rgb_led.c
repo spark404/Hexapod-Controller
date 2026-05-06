@@ -67,9 +67,10 @@ void rgb_led_task(void *argument)
     for (;;) {
         rgb_led_cmd_t cmd;
 
-        /* Non-blocking check for new commands; we still want periodic timing.
-           You can use xQueueReceive with timeout if you prefer. */
-        if (osMessageQueueGet(rgb_led_queueHandle, &cmd, NULL, osWaitForever) == pdPASS) {
+        /* Block until a command arrives. osMessageQueueGet returns osOK (0)
+           on success -- not pdPASS (1). The earlier comparison silently
+           dropped every command. */
+        if (osMessageQueueGet(rgb_led_queueHandle, &cmd, NULL, osWaitForever) == osOK) {
             switch (cmd.type) {
                 case RGB_LED_CMD_SET_COLOR:
                     s_current_color = cmd.data.color;
