@@ -1266,6 +1266,14 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
         return;
     }
 
+    // HAL invokes this from the UART TC interrupt (UART_EndTransmit_IT), so the
+    // shift register is empty and the line is physically idle. Switch to the
+    // receiver and rearm RX DMA before returning -- doing it here in IRQ
+    // context guarantees no task-level preemption between line-idle and DMA-
+    // armed, which would otherwise drop the start of the servo's reply.
+    HAL_HalfDuplex_EnableReceiver(huart);
+    HAL_UART_Receive_DMA(huart, dma_rx_buf, DMA_RX_BUF_SIZE);
+
     // osThreadFlagsSet internally handles context switching from ISR
     osThreadFlagsSet(usartTxTaskHandle, TX_DMA_TC);
 }
@@ -2299,28 +2307,15 @@ void StartUsartTxTask(void *argument)
         // Just to be sure
         __HAL_UART_CLEAR_FLAG(huart, UART_FLAG_TC);
 
-        // Start the transfer
+        // Start the transfer. HAL_UART_TxCpltCallback fires from the TC IRQ
+        // when the line is physically idle and rearms the receiver before
+        // setting TX_DMA_TC, so by the time we wake up RX DMA is already
+        // running.
         if (HAL_UART_Transmit_DMA(huart, msg.data, msg.len) != HAL_OK) {
             LOG_ERROR("[USARTTX] Failed to start transfer");
         };
 
-        // wait for a signal that the transfer is complete
         osThreadFlagsWait(TX_DMA_TC, osFlagsWaitAny, osWaitForever);
-
-        // VERY IMPORTANT: wait until line is physically idle
-        while (__HAL_UART_GET_FLAG(huart, UART_FLAG_TC) == RESET) {
-            /* spin very briefly */
-        }
-
-        // Enable Receiver
-        if (HAL_HalfDuplex_EnableReceiver(huart) != HAL_OK) {
-            LOG_ERROR("[USARTTX] Failed to enable receiver");
-        };
-
-        // Start the receiver
-        if (HAL_UART_Receive_DMA(huart, dma_rx_buf, DMA_RX_BUF_SIZE) != HAL_OK) {
-            LOG_ERROR("[USARTTX] Failed to start receiver");
-        };
 
         // Release DMA mutex after restart complete
         osMutexRelease(uart_dma_mutexHandle);
