@@ -2245,6 +2245,15 @@ void StartUsartRxTask(void *argument)
         if (flags & (RX_DMA_HT | RX_DMA_TC | RX_DMA_IDLE)) {
             uart_rx_drain_dma();
         }
+
+        if (flags & RX_DMA_ERROR) {
+            /* HAL aborts the DMA on framing/overrun/noise errors; if we don't
+             * rearm here the receiver stays wedged until the next
+             * uart_rx_reset_dma() from the servo task. Any partially-received
+             * bytes are unreliable, so flush them. */
+            LOG_WARN("[USARTRX] UART error, resetting DMA receiver");
+            uart_rx_reset_dma();
+        }
     }
   /* USER CODE END StartUsartRxTask */
 }
