@@ -2624,9 +2624,14 @@ void StartServoTask(void *argument)
             // notify error
             break;
         case SERVO_POWER_DOWN:
+            LOG_INFO("[ServoTask] entering POWER_DOWN");
             // disable torque on all motors
             for (int i=0; i<18; i++) {
-                dynamixel_set_torque_enable(&dynamixel_servos[i], 0);
+                dynamixel_result_t r = dynamixel_set_torque_enable(&dynamixel_servos[i], 0);
+                if (r != DNM_OK) {
+                    LOG_WARN("[ServoTask] torque disable failed for servo %d (err %d)",
+                             dynamixel_servos[i].id, r);
+                }
                 dynamixel_set_led(&dynamixel_servos[i], 0);
             }
             state = SERVO_IDLE;
