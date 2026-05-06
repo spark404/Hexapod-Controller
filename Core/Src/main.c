@@ -1689,12 +1689,16 @@ void PERIF_Dynamixel_Configure(void) {
     for (int i = 0; i < 3 * 6; i++) {
         dynamixel_set_led(&dynamixel_servos[i], 1);
 
-        // Reduce Return Delay Time for faster response (0 * 2us = 0us)
-        // The default is usually 250 (500us), previous code set it to 20 (40us).
+        // Return Delay Time = 10 * 2us = 20us. Must be > the firmware's
+        // TX-to-RX direction-switch latency (TC IRQ -> EnableReceiver ->
+        // Receive_DMA), otherwise the servo's preamble starts arriving before
+        // the receiver is armed and the reply is parsed as garbage
+        // (DNM_LL_ERR / 68). Default is 250 (500us), previous code used 20 (40us)
+        // and 0 (0us) which both proved too tight.
         uint8_t rdt;
         if (dynamixel_get_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_RETURN_DELAY_TIME, &rdt) == DNM_OK) {
-            if (rdt != 0) {
-                dynamixel_set_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_RETURN_DELAY_TIME, 0);
+            if (rdt != 10) {
+                dynamixel_set_byte_parameter(&dynamixel_servos[i], XL430_CT_EEP_RETURN_DELAY_TIME, 10);
             }
         }
 
