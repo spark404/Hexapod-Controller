@@ -207,9 +207,6 @@ osThreadId_t usartTxTaskHandle;
 const osThreadAttr_t usartTxTask_attributes = {
   .name = "usartTxTask",
   .stack_size = 128 * 4,
-  /* Must be at least as high as any periodic sensor task so that the TC -> RX
-   * rearm window in StartUsartTxTask cannot be preempted; otherwise the start
-   * of a Dynamixel reply can be lost and produce DNM_LL_ERR (68). */
   .priority = (osPriority_t) osPriorityHigh3,
 };
 /* Definitions for controlTask */
@@ -815,7 +812,7 @@ static void MX_TIM1_Init(void)
 
   /* USER CODE END TIM1_Init 1 */
   htim1.Instance = TIM1;
-  htim1.Init.Prescaler = 16-1;
+  htim1.Init.Prescaler = 84-1;
   htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
   htim1.Init.Period = 0xFFFF - 1;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -1058,9 +1055,10 @@ BMM350_INTF_RET_TYPE stm32_bmm350_write(uint8_t reg_addr, const uint8_t *reg_dat
 
 void stm32_bmm350_delay_us(uint32_t period, void *intf_ptr) {
     (void) intf_ptr;
-    // htim1 setup, prescaler 16-1, ARR 0xffff-1
-    __HAL_TIM_SET_COUNTER(&htim1, 0); // set the counter value a 0
-    while (__HAL_TIM_GET_COUNTER(&htim1) < period); // wait for the counter to reach the us input in the parameter
+    // TIM1 is clocked from PCLK2 (84 MHz); prescaler 84-1 gives a 1 MHz
+    // counter (1 us per tick) and ARR 0xFFFF-1 caps the max delay at ~65 ms.
+    __HAL_TIM_SET_COUNTER(&htim1, 0);
+    while (__HAL_TIM_GET_COUNTER(&htim1) < period);
 }
 
 BMI08_INTF_RET_TYPE stm32_bmi08_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, void *intf_ptr) {
@@ -1105,9 +1103,10 @@ BMI08_INTF_RET_TYPE stm32_bmi08_write(uint8_t reg_addr, const uint8_t *reg_data,
 
 void stm32_bmi08_delay_us(uint32_t period, void *intf_ptr) {
     (void) intf_ptr;
-    // htim1 setup, prescaler 16-1, ARR 0xffff-1
-    __HAL_TIM_SET_COUNTER(&htim1, 0); // set the counter value a 0
-    while (__HAL_TIM_GET_COUNTER(&htim1) < period); // wait for the counter to reach the us input in the parameter
+    // TIM1 is clocked from PCLK2 (84 MHz); prescaler 84-1 gives a 1 MHz
+    // counter (1 us per tick) and ARR 0xFFFF-1 caps the max delay at ~65 ms.
+    __HAL_TIM_SET_COUNTER(&htim1, 0);
+    while (__HAL_TIM_GET_COUNTER(&htim1) < period);
 }
 
 /**
