@@ -7,22 +7,23 @@
 #include "rgb_led.h"
 
 #include "cmsis_os2.h"
+#include "main.h"            // For ST_LED_R/G/B_Pin and _GPIO_Port (CubeMX generated)
 #include "stm32f4xx_hal.h"   // For GPIO / HAL functions
 
 /* ---- External Command Queue ---- */
 extern osMessageQueueId_t rgb_led_queueHandle;
 
 /* ---------- Hardware-specific section ---------- */
-/* Adjust these to your board: pins, ports, active level, etc. */
+/* Track the CubeMX-generated pin labels so hardware revisions stay in sync. */
 
-#define RGB_LED_R_GPIO_Port   GPIOA
-#define RGB_LED_R_Pin         GPIO_PIN_15
+#define RGB_LED_R_GPIO_Port   ST_LED_R_GPIO_Port
+#define RGB_LED_R_Pin         ST_LED_R_Pin
 
-#define RGB_LED_G_GPIO_Port   GPIOC
-#define RGB_LED_G_Pin         GPIO_PIN_10
+#define RGB_LED_G_GPIO_Port   ST_LED_G_GPIO_Port
+#define RGB_LED_G_Pin         ST_LED_G_Pin
 
-#define RGB_LED_B_GPIO_Port   GPIOA
-#define RGB_LED_B_Pin         GPIO_PIN_14
+#define RGB_LED_B_GPIO_Port   ST_LED_B_GPIO_Port
+#define RGB_LED_B_Pin         ST_LED_B_Pin
 
 /* If your LED is active-high, set ON to GPIO_PIN_SET.
    If it is active-low, swap SET/RESET. */
