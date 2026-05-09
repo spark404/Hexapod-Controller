@@ -2373,7 +2373,9 @@ void StartControlTask(void *argument)
       last_ticks = now;
 
       float dt_s = (float)dt_ticks * (float)portTICK_PERIOD_MS * 1e-3f;
-      dt_s = clampf(dt_s, 0.0005f, 0.05f);
+      // Bounded around the 100ms CONTROL_LOOP_INTERVAL: half-tick to double-tick.
+      // Revisit if the controlTask rate changes.
+      dt_s = clampf(dt_s, 0.05f, 0.2f);
 
       // Update control information from shared state
       cmd.velocity = updated_velocity;
@@ -2541,7 +2543,9 @@ void StartServoTask(void *argument)
             TickType_t dt_ticks = now - last_ticks;
             last_ticks = now;
             float32_t dt_s = (float32_t)dt_ticks * (float32_t)portTICK_PERIOD_MS * 1e-3f;
-            dt_s = clampf(dt_s, 0.0005f, 0.05f); // avoid stalls & spikes
+            // Bounded around the 20ms SERVO_LOOP_INTERVAL: half-tick to double-tick.
+            // Revisit if the servoTask rate changes.
+            dt_s = clampf(dt_s, 0.01f, 0.04f);
 
             float32_t max_step = SERVO_MAX_VELOCITY * dt_s;
             for (int i=0; i<6; i++) {
