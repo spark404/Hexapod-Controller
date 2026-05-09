@@ -12,6 +12,7 @@
 
 typedef enum {
     CTRL_BOOT,
+    CTRL_SYNCING,
     CTRL_STANDUP,
     CTRL_STANDING,
     CTRL_WALKING,
@@ -56,7 +57,7 @@ typedef struct controller_ctx {
 
     struct robot_state robot;
 
-    /* Callback */
+/* Callback */
     controller_state_cb_t on_state_change;
     void *cb_user_data;
 } controller_ctx_t;

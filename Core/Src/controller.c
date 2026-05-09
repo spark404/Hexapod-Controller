@@ -26,6 +26,7 @@ void controller_init(controller_ctx_t *ctx) {
     ctx->next_state = CTRL_BOOT;
     ctx->powerdown_timeout = CTRL_POWERDOWN_TIMEOUT;
     ctx->pending_yaw = 0.0f;
+    ctx->on_state_change = NULL;
 
     // Do a bunch of static calculations that depend on the robot configuration in robot.h
     pose_set(&ctx->robot.hexapod, 0, 0, 0, 0, 0, 0);
@@ -190,7 +191,7 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
 
     // Rules for transitions
     if (ctx->state == CTRL_BOOT) {
-        ctx->next_state = CTRL_STANDUP;
+        ctx->next_state = CTRL_SYNCING;
     }
 
     if (ctx->state == CTRL_STANDING) {
@@ -204,7 +205,7 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
     }
 
     if (ctx->state == CTRL_POWERDOWN && (wants_translation || wants_rotation)) {
-        ctx->next_state = CTRL_STANDUP;
+        ctx->next_state = CTRL_SYNCING;
     }
 
     if (ctx->state == CTRL_STANDING) {
@@ -254,7 +255,37 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
         }
     }
 
-    if (ctx->state == CTRL_STANDUP) {
+    if (ctx->state == CTRL_SYNCING) {
+        // Make sure actual and next angles are set to the same value
+        // Check if we have valid joint data (not all zeros)
+        int has_valid_data = 0;
+        for (int i = 0; i < 6; i++) {
+            for (int j = 0; j < 3; j++) {
+                if (fabsf(ctx->robot.leg_state[i].actual_joint_angles[j]) > 0.01f) {
+                    has_valid_data = 1;
+                    break;
+                }
+            }
+            if (has_valid_data) break;
+        }
+
+        if (!has_valid_data) {
+            LOG_DEBUG("SYNC: Waiting for valid joint data...");
+            return; // Stay in SYNCING until we get real data
+        }
+
+        for (int i = 0; i < 6; i++) {
+            arm_vec_copy_f32(ctx->robot.leg_state[i].actual_joint_angles,
+                             ctx->robot.leg_state[i].next_joint_angles, 3);
+            if (i == 0) {
+                LOG_DEBUG("SYNC Leg 0 angles: %.3f, %.3f, %.3f",
+                    ctx->robot.leg_state[i].actual_joint_angles[0],
+                    ctx->robot.leg_state[i].actual_joint_angles[1],
+                    ctx->robot.leg_state[i].actual_joint_angles[2]);
+            }
+        }
+        ctx->next_state = CTRL_STANDUP;
+    } else if (ctx->state == CTRL_STANDUP) {
         int ready = 1;
         motion_param_t motion_param = {CTRL_DEFAULT_VEL, CTRL_LIFT_VEL, CTRL_LIFT_Z};
         // Perform the standup routine, follows on SYNCING
@@ -322,6 +353,9 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
     } else if (ctx->state == CTRL_WALKING) {
         // Ensure tripod consistency (only re-init if all legs grounded)
         tripod_init_gait(ctx, &Thexapod_body);
+
+        LOG_DEBUG("Actual: %5.2f, %5.2f, %5.2f", ctx->robot.leg_state[1].actual_joint_angles[0], ctx->robot.leg_state[1].actual_joint_angles[1], ctx->robot.leg_state[1].actual_joint_angles[2] );
+        LOG_DEBUG("Next: %5.2f, %5.2f, %5.2f", ctx->robot.leg_state[1].next_joint_angles[0], ctx->robot.leg_state[1].next_joint_angles[1], ctx->robot.leg_state[1].next_joint_angles[2] );
 
         // 1) Compute desired rotation for this timestep
         float32_t desired_omega = ctx->yaw_error / dt_s;
@@ -474,9 +508,9 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
 
             effective_velocity = fmaxf(effective_velocity, 1e-3f);
 
-            if (longest_path < CTRL_CLOSE_THRESH) {
-                continue;
-            }
+            //if (longest_path < CTRL_CLOSE_THRESH) {
+            //    continue;
+            //}
 
             float32_t substeps = longest_path / effective_velocity;
             substeps = fmaxf(substeps, 1.0f);
@@ -505,6 +539,11 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
                         3
                     )
                 );
+                if (i==1) {
+                    LOG_DEBUG("Path length: %5.2f", remaining_path_length);
+                    LOG_DEBUG("P_NEXT_BODY: %5.2f, %5.2f, %5.2f", p_next_body[0], p_next_body[1], p_next_body[2]);
+                    LOG_DEBUG("P_TARGET: %5.2f, %5.2f, %5.2f", paths[i][3][0], paths[i][3][1], paths[i][3][2]);
+                }
                 arm_vec_copy_f32(p_next_world, leg->tip_world_coordinates, 3);
             }
 
@@ -515,6 +554,7 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
             inverse_kinematics(origin3, p_next_coxa, leg->next_joint_angles);
         }
 
+        LOG_DEBUG("Remaining: %5.2f", remaining_path_length);
         if (remaining_path_length < CTRL_CLOSE_THRESH) {
             swap_legs(ctx);
         }
@@ -558,7 +598,7 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
                 p_current[1]
             };
 
-            // ẑ × r
+            // ẑ × r
             float32_t r_perp[2] = {
                 -r[1],
                 r[0]
@@ -627,10 +667,6 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
             arm_mat_mult_f32(&Thexapod_body, &leg->coxa_mat, &T);
             matrix_3d_invert(&T, &Tinv);
 
-            // if (longest_path < CTRL_CLOSE_THRESH) {
-            //     continue;
-            // }
-
             float32_t distance_per_tick = CTRL_DEFAULT_VEL * dt_s;
             distance_per_tick = fmaxf(distance_per_tick, 1e-6f);
 
@@ -664,7 +700,6 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
             inverse_kinematics(origin3, p_next_coxa, leg->next_joint_angles);
         }
 
-        // --- 4) Tripod swap condition (NO body rotation yet) ---
         if (remaining_path_length < CTRL_CLOSE_THRESH) {
             swap_legs(ctx);
         }
@@ -674,11 +709,12 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
 const char *controller_state_to_string(controller_state_t state) {
     switch (state) {
         case CTRL_BOOT: return "BOOT";
+        case CTRL_SYNCING: return "SYNCING";
         case CTRL_STANDUP: return "STANDUP";
         case CTRL_STANDING: return "STANDING";
         case CTRL_WALKING: return "WALKING";
-        case CTRL_POWERDOWN: return "POWERDOWN";
         case CTRL_ROTATING: return "ROTATING";
+        case CTRL_POWERDOWN: return "POWERDOWN";
         default: return "UNKNOWN";
     }
 }
