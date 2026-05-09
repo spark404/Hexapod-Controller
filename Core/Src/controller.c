@@ -354,9 +354,6 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
         // Ensure tripod consistency (only re-init if all legs grounded)
         tripod_init_gait(ctx, &Thexapod_body);
 
-        LOG_DEBUG("Actual: %5.2f, %5.2f, %5.2f", ctx->robot.leg_state[1].actual_joint_angles[0], ctx->robot.leg_state[1].actual_joint_angles[1], ctx->robot.leg_state[1].actual_joint_angles[2] );
-        LOG_DEBUG("Next: %5.2f, %5.2f, %5.2f", ctx->robot.leg_state[1].next_joint_angles[0], ctx->robot.leg_state[1].next_joint_angles[1], ctx->robot.leg_state[1].next_joint_angles[2] );
-
         // 1) Compute desired rotation for this timestep
         float32_t desired_omega = ctx->yaw_error / dt_s;
         desired_omega = clampf(desired_omega, -CTRL_MAX_YAW_RATE, +CTRL_MAX_YAW_RATE);
@@ -478,6 +475,7 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
             }
         }
 
+        float32_t longest_grounded_path = longest_path;
         longest_path = fminf(longest_path, longest_lifted_path);
 
         // Some form of clamping?
@@ -527,23 +525,13 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
             float32_t p_next_world[3];
             matrix_3d_vec_transform(&Thexapod_body, p_next_body, p_next_world);
 
+            float32_t leg_dist_to_target = arm_euclidean_distance_f32(p_next_body, paths[i][3], 3);
+
             if (leg->grounded) {
                 // Use the existing coordinates for the world frame
                 arm_vec_copy_f32(leg->tip_world_coordinates, p_next_world, 3);
             } else {
-                remaining_path_length = fmaxf(
-                    remaining_path_length,
-                    arm_euclidean_distance_f32(
-                        p_next_body,
-                        paths[i][3],
-                        3
-                    )
-                );
-                if (i==1) {
-                    LOG_DEBUG("Path length: %5.2f", remaining_path_length);
-                    LOG_DEBUG("P_NEXT_BODY: %5.2f, %5.2f, %5.2f", p_next_body[0], p_next_body[1], p_next_body[2]);
-                    LOG_DEBUG("P_TARGET: %5.2f, %5.2f, %5.2f", paths[i][3][0], paths[i][3][1], paths[i][3][2]);
-                }
+                remaining_path_length = fmaxf(remaining_path_length, leg_dist_to_target);
                 arm_vec_copy_f32(p_next_world, leg->tip_world_coordinates, 3);
             }
 
@@ -552,9 +540,21 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
 
             float32_t origin3[3] = {0, 0, 0};
             inverse_kinematics(origin3, p_next_coxa, leg->next_joint_angles);
+
+            LOG_DEBUG("[L%d %s] plen=%5.2f step=%5.2f dist=%5.2f act=%5.2f,%5.2f,%5.2f nxt=%5.2f,%5.2f,%5.2f",
+                i, leg->grounded ? "G" : "L",
+                path_length, step_length, leg_dist_to_target,
+                leg->actual_joint_angles[0], leg->actual_joint_angles[1], leg->actual_joint_angles[2],
+                leg->next_joint_angles[0], leg->next_joint_angles[1], leg->next_joint_angles[2]);
         }
 
-        LOG_DEBUG("Remaining: %5.2f", remaining_path_length);
+        float32_t walk_eff_v = fmaxf(
+            arm_vec_magnitude_f32(movement_vector, 3) + fabsf(rotation_step) * max_r,
+            1e-3f);
+        LOG_DEBUG("[WALK] longest=%5.2f (grnd=%5.2f lift=%5.2f) eff_v=%5.3f subs=%5.2f rem=%5.2f",
+            longest_path, longest_grounded_path, longest_lifted_path,
+            walk_eff_v, fmaxf(longest_path / walk_eff_v, 1.0f),
+            remaining_path_length);
         if (remaining_path_length < CTRL_CLOSE_THRESH) {
             swap_legs(ctx);
         }
