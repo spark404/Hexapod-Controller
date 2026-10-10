@@ -276,6 +276,8 @@ const osEventFlagsAttr_t systemEvents_attributes = {
   .name = "systemEvents"
 };
 /* USER CODE BEGIN PV */
+/* Set when the HSE did not start and the clock fell back to the HSI */
+volatile uint8_t g_clock_hse_failed = 0;
 i2c_intf_ptr bmm350_intf;
 bmm350_t bmm350;
 
@@ -345,6 +347,7 @@ void StartServoTask(void *argument);
 void rgb_led_task(void *argument);
 
 /* USER CODE BEGIN PFP */
+static int clock_hse_fallback(void);
 int __io_putchar(int ch);
 
 BMM350_INTF_RET_TYPE stm32_bmm350_read(uint8_t reg_addr, uint8_t *reg_data, uint32_t len, void *intf_ptr);
@@ -444,6 +447,11 @@ int main(void)
 
     LOG_INFO("[Main] Hexapod Control Firmware");
     LOG_INFO("[Main] Build: %s %s", __DATE__, __TIME__);
+    if (g_clock_hse_failed) {
+        LOG_WARN("[Main] HSE failed to start, running from HSI (SYSCLK %lu Hz)", (unsigned long) SystemCoreClock);
+    } else {
+        LOG_INFO("[Main] Clock: HSE, SYSCLK %lu Hz", (unsigned long) SystemCoreClock);
+    }
 
     LOG_INFO("[Main] Core initialisation");
     ringbuf_init(&rx_ring, rx_ring_buffer, sizeof(rx_ring_buffer));
@@ -587,13 +595,12 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 16;
-  RCC_OscInitStruct.PLL.PLLN = 336;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 8;
+  RCC_OscInitStruct.PLL.PLLN = 168;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV4;
   RCC_OscInitStruct.PLL.PLLQ = 7;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
@@ -1005,6 +1012,45 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+/**
+ * HSE start-up fallback.
+ *
+ * SystemClock_Config() calls Error_Handler() when HAL_RCC_OscConfig() times
+ * out waiting for the crystal. In that state HSEON is set, HSERDY is not, the
+ * PLL is still off and SYSCLK is still the HSI. This switches the HSE off and
+ * builds the same 84 MHz PLL output from the HSI (M=16, N=336, P=4, Q=7), so
+ * the HAL_RCC_ClockConfig() call that follows in SystemClock_Config() succeeds.
+ * Timing is then HSI-accurate (about 1 %) instead of crystal-accurate.
+ *
+ * Returns 1 when the fallback clock is running, 0 if the error was something
+ * else or the fallback itself failed. Only one attempt is made.
+ */
+static int clock_hse_fallback(void)
+{
+    if (g_clock_hse_failed) {
+        return 0;
+    }
+    if ((RCC->CR & RCC_CR_HSEON) == 0U || (RCC->CR & RCC_CR_HSERDY) != 0U ||
+        (RCC->CR & RCC_CR_PLLON) != 0U) {
+        return 0;
+    }
+
+    g_clock_hse_failed = 1;
+
+    RCC_OscInitTypeDef osc = {0};
+    osc.OscillatorType = RCC_OSCILLATORTYPE_HSE | RCC_OSCILLATORTYPE_HSI;
+    osc.HSEState = RCC_HSE_OFF;
+    osc.HSIState = RCC_HSI_ON;
+    osc.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    osc.PLL.PLLState = RCC_PLL_ON;
+    osc.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+    osc.PLL.PLLM = 16;
+    osc.PLL.PLLN = 336;
+    osc.PLL.PLLP = RCC_PLLP_DIV4;
+    osc.PLL.PLLQ = 7;
+    return HAL_RCC_OscConfig(&osc) == HAL_OK;
+}
+
 #define DEBUG_USART USART1
 int __io_putchar(int ch) {
     while (!LL_USART_IsActiveFlag_TXE(DEBUG_USART)) {
@@ -2705,6 +2751,11 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
+    /* HSE did not start: carry on from the HSI instead of halting */
+    if (clock_hse_fallback()) {
+        return;
+    }
+
     /* User can add his own implementation to report the HAL error return state */
     __disable_irq();
 
