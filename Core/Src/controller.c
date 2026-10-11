@@ -473,7 +473,7 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
                         movement_vector[0] + rot_disp[0],
                         movement_vector[1] + rot_disp[1]
                     };
-                    leg->swing_path_length = leg_generate_path(
+                    leg_generate_path(
                         body_z,
                         p_current,
                         CTRL_LEG_RADIUS_MM,
@@ -482,6 +482,11 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
                         true,
                         leg->swing_path
                     );
+                    // leg_generate_path returns the straight-line distance from
+                    // start to target, but we need to advance swing_progress
+                    // along the actual lift+travel+lower arc. Use the summed
+                    // segment length instead.
+                    leg->swing_path_length = calculate_path_length(leg->swing_path);
                     leg->swing_progress = 0.0f;
                 }
 
