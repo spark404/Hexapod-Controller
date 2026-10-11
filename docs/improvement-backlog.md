@@ -96,7 +96,7 @@ and T7.12 is done, all verified on the robot (commits `2b0e064`, `d6c1be3`,
 | T4.2 | 2 | Open | Depends on T4.1. |
 | T7.2 | 2 | Open | New. |
 | T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
-| T7.4 | 2 | Open | New. Only Present Position is read today. |
+| T7.4 | 2 | Partial | New. Load, velocity and position come back in one 10-byte Sync Read (library `5b681c9`) and are published; not yet checked on the robot (units, signs, timing). |
 | T7.5 | 3 | Open | New. Today: 7-byte single-parameter frames, no CRC, no reply. |
 | T5.1 | 4 | Open | Reach radius is a fixed 40 mm. |
 | T5.2 | 4 | Open | `attitude` still discarded (`(void)attitude`). |
@@ -235,8 +235,9 @@ the first failure.
 **Follow-ups.**
 - T7.4 adds the load read: give it its own `bus_op_t` so it is timed and
   counted too.
-- Per-servo attribution needs a change in the `dynamixel` library (the Sync
-  Read returns one result for all 18 servos). Not done.
+- Per-servo attribution: **done** with the library's per-servo status (T7.4).
+  A failed read is counted for the servo that gave no data; for a timeout only
+  the first silent servo is counted, not the ones behind it.
 - The per-failure `LOG_WARN` / `LOG_ERROR` lines in the servo task are still
   there and can flood the serial port on a bad bus; they could drop to `DEBUG`
   now that the summary exists.
@@ -516,6 +517,28 @@ makes `PERIF_Dynamixel_Init` halt) and step 3.
 **Source:** [`design.md`](design.md) §7.1, Appendix A.2.
 **Effort:** S.
 **Depends on:** register map confirmed against the XL430-W250-2 control table.
+**Status:** **implemented, not yet verified on the robot.** The servo task reads
+registers 126–135 for every servo with `dynamixel_get_bytes_multiple` (10 bytes:
+load int16, velocity int32, position uint32) and publishes `load_pct[6][3]`
+(0.1 % units converted to %) and `velocity_radps[6][3]` in `servo_shared_state`
+through `servo_set_load_and_velocity()` / `servo_copy_load()` /
+`servo_copy_velocity()`. The values are in the **servo frame**: the signs are not
+the compensated joint frame (`compensate()` flips the femur sign). A
+`[LOAD] f/t %: ...` debug line with the femur and tibia load of all legs is
+printed every 5 s. Open: the bench checks below, and confirming the register
+addresses and units against the control table (they are from memory).
+
+Behavior changes that came with it:
+- A servo that does not answer in a cycle now keeps its own last position; the
+  other 17 are updated. Before, one failure meant no servo was updated.
+- Only a timeout or bus error resets the UART receiver (with the 5 ms wait).
+  A damaged reply is read in full, so the receiver stays in step and needs no
+  reset.
+- A servo reporting a hardware alert (flag `0x80`) no longer fails the whole
+  read: its data is valid. A change in the set of alerting servos is logged and
+  counted (`servo alerts`).
+- The bus diagnostics gained a failed-reads-per-servo line (servo index =
+  leg × 3 + joint), which answers the per-servo attribution follow-up in T7.12.
 
 **Do.** Extend the per-tick Sync Read to start at Present Load and cover Present
 Velocity and Present Position in one contiguous read (10 bytes per servo).
@@ -620,10 +643,13 @@ The Pi-facing protocol: one atomic command, CRC, status reply and link supervisi
 2. In the SPI task: receive, validate magic, version and CRC, drop duplicates by
    `seq`, and write a `cmd_shared` struct through critical-section helpers
    (atomic command, replacing the three `updated_*` globals).
-3. Fill a status frame (state, fault, yaw, per-leg contact bits) as the reply
-   on the same transfer.
-4. Link supervision: no valid frame for `T_LINK` (300 ms) forces a zero twist;
-   keep the old `0x01`–`0x03` commands only during the transition.
+3. Fill a status frame as the reply on the same transfer. Give it a version
+   byte and a length (decision D7): v1 is state, fault, yaw and per-leg contact
+   bits; odometry pose, roll and pitch, battery and servo health are added later
+   as the Pi needs them (design §3.2). The Pi ignores unknown fields.
+4. Link supervision: no valid frame for `T_LINK` (300 ms) forces a zero twist,
+   so the robot stops and stands; there is no separate dead-link behavior
+   (decision D5). Keep the old `0x01`–`0x03` commands only during the transition.
 5. Add a Pi-side test sender under `tools/`.
 
 **Verify.**
@@ -663,8 +689,12 @@ frame*, not body frame.
 **Effort:** M.
 **Depends on:** T7.4.
 
-**Do.** In the servo task: maintain an unloaded-load baseline per leg
-(calibrated each standup, decision D8), compute `excess` over femur and tibia,
+**Do.** In the servo task: maintain an unloaded-load baseline per leg,
+calibrated by a per-leg lift test once after each MCU reset, during the first
+STANDUP (decision D8, design §7.6: one leg at a time, load recorded at a few
+poses between stance and swing height; STANDING is not reported until it is
+done; an incomplete test leaves the kinematic fallback active and is retried at
+the next STANDUP). Compute `excess` over femur and tibia,
 declare contact after `N` consecutive samples above `T_on` and release below
 `T_off`. Publish `contact[6]` and its source. When load is unavailable use the
 kinematic fallback (`tip_world_z ≤ ε_z`, flat ground). Log load/kinematic
@@ -673,6 +703,9 @@ disagreements.
 **Verify.**
 - *Bench:* press and release each foot; contact flips cleanly with no chatter.
 - *Bench:* disable the load read to confirm the fallback path engages.
+- *Bench:* after a reset the lift test runs on all six legs and the baseline is
+  not recalibrated at a later standup; interrupt the test (drop the command
+  link) and confirm the fallback is used and the test is retried.
 
 
 ### T7.7 — Simulator support for the new design
@@ -811,15 +844,22 @@ identity.
    starting pose is unknown (rest on the ground, decision D6).
 2. `STOPPING`: finish swings, recenter feet to home in alternating groups,
    body level; `STANDING` handles height changes.
-3. Timers: `T_LINK` forces zero twist; `T_IDLE` (120 s) triggers `SITDOWN`,
-   which lowers the body to the ground and then drops torque.
+3. Timers: `T_LINK` forces zero twist, so a lost link stops the robot and
+   leaves it standing (decision D5); `T_IDLE` (120 s) is the time spent standing
+   and triggers `SITDOWN`, which lowers the body to the ground and then drops
+   torque. It is the same timer whether the Pi sends zero twist or is gone. A
+   lost link does not interrupt `STANDUP`; it completes into `STANDING`.
 4. `RESTING`: servo bus quiet (torque off, no reads); wake on the first
    non-idle valid command.
+5. After an MCU reset the first `STANDUP` includes the leg lift test (T7.6,
+   decision D8) before it reports `STANDING`.
 
 **Verify.**
 - *Sim:* walk, stop, wait for `T_IDLE`; the body sits and torque goes off, then
   wakes on a command.
 - *Bench:* repeat on the robot; legs must not flop on power-down.
+- *Bench:* stop the command stream while walking: the robot stops, ends in
+  `STANDING`, and sits down after `T_IDLE`.
 
 
 ### T5.6 — Emergency stop input

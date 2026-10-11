@@ -252,8 +252,8 @@ Add to [`Core/Src/servos.c`](../Core/Src/servos.c) alongside
 `xl430_rad_centered_to_pulse`:
 
 ```c
-#define XL430_PROFILE_VEL_UNIT_RADPS  0.0239952f  /* 0.229 rev/min in rad/s */
-#define XL430_PROFILE_ACC_UNIT_RADPS2 0.37445f    /* 214.577 rev/min² in rad/s² */
+#define XL430_PROFILE_VEL_UNIT_RADPS  0.0239808f  /* 0.229 rev/min in rad/s */
+#define XL430_PROFILE_ACC_UNIT_RADPS2 0.374508f   /* 214.577 rev/min² in rad/s² */
 
 uint32_t xl430_radps_to_profile_velocity(float32_t radps) {
     float32_t units = radps / XL430_PROFILE_VEL_UNIT_RADPS;
@@ -270,8 +270,8 @@ uint32_t xl430_radps2_to_profile_acceleration(float32_t radps2) {
 }
 ```
 
-Constants: `0.229 rev/min × 2π/60 = 0.0239952 rad/s` per unit;
-`214.577 rev/min² × 2π/3600 = 0.37445 rad/s²` per unit. Cross-check
+Constants: `0.229 rev/min × 2π/60 = 0.0239808 rad/s` per unit;
+`214.577 rev/min² × 2π/3600 = 0.374508 rad/s²` per unit. Cross-check
 against the XL430 e-Manual for your firmware revision.
 
 ---

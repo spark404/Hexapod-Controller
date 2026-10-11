@@ -2,9 +2,8 @@
 
 **Status: DRAFT for review (rev 2).** This restates the original design intent as a
 single coherent design and proposes how to get there from the current code.
-Decisions D1, D2, D3 and D6 are accepted; D4 has a recommendation backed by
-Appendix A; D5, D7 and D8 are still open. Open decisions are marked **❓** and
-collected in §11. Once approved it replaces [`control-model.md`](control-model.md).
+Decisions D1, D2, D3, D5, D6, D7 and D8 are accepted; D4 has a recommendation
+backed by Appendix A. Decisions are collected in §11. Once approved it replaces [`control-model.md`](control-model.md).
 
 Related: [`controller-overview.md`](controller-overview.md) (as built),
 [`controller-audit.md`](controller-audit.md) (known problems),
@@ -116,9 +115,23 @@ height f32 | tilt_r f32 | tilt_p f32 | gait(1) | crc16(2)
 ```
 
 SPI is full duplex and the STM32 is the slave, so every command transfer also
-clocks out a **status frame** (state, fault code, per-leg contact bits,
-estimated yaw, battery if available). The reply content is fixed one transfer
-ahead, so status lags by one frame; fine at the command rate.
+clocks out a **status frame**. The reply content is fixed one transfer ahead,
+so status lags by one frame; fine at the command rate.
+
+**Telemetry (D7, accepted).** Path planning, navigation and other higher
+functions stay on the Raspberry Pi; the controller is the low-level layer that
+turns a twist into a gait. The Pi will therefore eventually need the full
+picture, so the status frame carries a version byte and a length and grows in
+steps:
+
+| Version | Content |
+|---------|---------|
+| v1 (first implementation) | State, fault code, per-leg contact bits, estimated yaw |
+| later | Odometry pose from stance feet (x, y, yaw; §5.5), roll and pitch, achieved twist, battery voltage, servo temperatures and voltages, bus health counters (backlog T7.12) |
+
+The Pi has to ignore fields it does not know, and the controller must not
+depend on the Pi using any of them. Everything beyond v1 is added when the Pi
+side needs it, not before.
 
 ### 3.3 Link supervision
 
@@ -126,9 +139,12 @@ ahead, so status lags by one frame; fine at the command rate.
 |-----------|----------|
 | Valid frame with new `seq` | Command applied; `last_cmd_time` updated. |
 | CRC/magic error | Frame dropped; counts as no input. |
-| No valid frame for `T_LINK` (proposal 300 ms) | Twist forced to zero; robot decelerates and stops (§8). |
-| No valid frame for `T_LINK_FAULT` (proposal 5 s) | Treated as idle; the idle timer (§8.3) keeps running. |
-| Zero twist from a live link | Same as idle, but link is known good. |
+| No valid frame for `T_LINK` (proposal 300 ms) | Twist forced to zero; robot decelerates, stops and ends in STANDING (§8). |
+| Zero twist from a live link | Same behavior: stop and stand. |
+
+There is no separate behavior for a dead link (D5, accepted): losing the link
+makes the robot stop and stand, and from there the idle timer (§8.3) decides
+when it sits down, exactly as for a live link that sends zero twist.
 
 The Pi must send at ≥ 10 Hz (matches the control tick); 20–50 Hz recommended.
 
@@ -327,9 +343,8 @@ coxa joint is horizontal and mostly insensitive to ground load.
 Per leg, in the **servo task** (it owns the sensor, runs at 50 Hz, and avoids
 the 10 Hz control loop adding up to 100 ms of latency to a touchdown):
 
-1. Maintain a baseline of the unloaded load as a function of joint angles
-   (calibrated during standup/rest when the leg is known to be airborne or by
-   a short per-leg lift test).
+1. Maintain a baseline of the unloaded load as a function of joint angles. It
+   is calibrated by a per-leg lift test (D8, §7.6), once after each MCU reset.
 2. `excess = |load − baseline|` summed over femur and tibia.
 3. **Contact** when `excess > T_on` for `N` consecutive samples; **release**
    when `excess < T_off` (`T_off < T_on`, hysteresis).
@@ -388,6 +403,39 @@ which shortens the detect time by a few ms compared with the 1 Mbps rows. Contro
 25 Hz is only feasible after debug logging is made non-blocking (Appendix B,
 backlog T1.6).
 
+### 7.6 Baseline calibration: leg lift test (D8)
+
+Decision (accepted): the load baseline is calibrated **once**, at the first
+controller start after an MCU reset, by a per-leg lift test. It is not repeated
+at every standup.
+
+Interpretation, to confirm when implementing (backlog T7.6, T7.10): the "first
+controller start" is the first STANDUP after reset, and the test runs as the
+last part of it, with the body raised and the feet at home:
+
+1. Lift one leg at a time (the other five support the body, so any single leg
+   can be lifted safely), through a few poses between the stance height and the
+   swing height.
+2. At each pose, with the leg moving slowly or paused, record the femur and
+   tibia load. These samples are the unloaded baseline as a function of the
+   joint angles; detection (§7.2) interpolates between them.
+3. Lower the leg, confirm it takes load again (a sanity check on the baseline),
+   and go to the next leg.
+
+Rules:
+
+- Until a leg's baseline exists, its contact source is the kinematic fallback
+  (§7.3), and the status frame says so.
+- If the test cannot finish (fault, command lost, load unreadable), the baseline
+  stays uncalibrated, the fallback stays in use, and the test is tried again at
+  the next STANDUP.
+- A completed baseline stays valid until the next reset. Drift with battery
+  voltage and servo temperature over a long session is accepted for now; if
+  the logs show it matters, add a recalibration request to the command flags.
+- The test lifts legs with the Pi's command link possibly idle, so it must not
+  need new commands: once started it completes on its own, and STANDUP does not
+  report STANDING until it is done.
+
 ---
 
 ## 8. Lifecycle (R7)
@@ -398,14 +446,13 @@ backlog T1.6).
 @startuml
 [*] --> RESTING
 RESTING --> STANDUP : valid command (non-idle) / torque on
-STANDUP --> STANDING : all feet at home, body at height
+STANDUP --> STANDING : all feet at home, body at height\n(first after MCU reset: leg lift test done)
 STANDING --> MOVING : twist != 0
 MOVING --> STOPPING : twist == 0 || link lost
 STOPPING --> STANDING : all feet at home, level
 STOPPING --> MOVING : twist != 0
 STANDING --> SITDOWN : idle timer expired || power-down request
 SITDOWN --> RESTING : body lowered to rest pose / torque off
-STANDUP --> SITDOWN : command lost during standup
 MOVING --> FAULT : servo fault, support lost
 STANDING --> FAULT : servo fault
 FAULT --> RESTING : fault cleared by Pi
@@ -415,7 +462,7 @@ FAULT --> RESTING : fault cleared by Pi
 | State | Meaning |
 |-------|---------|
 | RESTING | Torque off. Body resting on the ground (D6). Servo bus quiet to save power. Only the SPI task, EKF and link supervision run. |
-| STANDUP | Torque on; legs sequenced out (one at a time if the pose is unknown, audit §2.4) and body raised to `height`. |
+| STANDUP | Torque on; legs sequenced out (one at a time if the pose is unknown, audit §2.4) and body raised to `height`. After an MCU reset the leg lift test (§7.6) runs before STANDING is reported. A lost link does not interrupt it: STANDUP completes, ends in STANDING, and the idle timer applies. |
 | STANDING | Feet at home, body level at `height`, no gait clock. Idle timer runs. |
 | MOVING | Gait clock running; twist applied (walk, strafe, rotate, arcs). |
 | STOPPING | Twist is zero. Finish the current swings, then recenter feet to `h_i` in alternating groups (tripod: swing the other tripod home), body level. Ends in STANDING. |
@@ -437,17 +484,21 @@ Two independent timers:
 | Timer | Starts when | Expires → | Proposal |
 |-------|-------------|-----------|----------|
 | `T_LINK` | Last valid frame | Twist forced to zero (§3.3) | 300 ms |
-| `T_IDLE` | Twist became zero (or link lost) while STANDING | SITDOWN → RESTING | 120 s (today's `CTRL_POWERDOWN_TIMEOUT`) |
+| `T_IDLE` | The robot enters STANDING | SITDOWN → RESTING | 120 s (today's `CTRL_POWERDOWN_TIMEOUT`) |
 
-Any non-zero command during STANDING resets `T_IDLE`; any valid non-idle
-command during RESTING triggers STANDUP. Optionally the Pi can request an
+`T_IDLE` measures the time spent standing (D5), so it does not matter whether
+the Pi is alive and sending zero twist or the link is down: both end in
+STANDING and the same timer runs. Any non-zero command during STANDING leaves
+the state and so resets `T_IDLE`; any valid non-idle command during RESTING
+triggers STANDUP. A link that comes back while SITDOWN is in progress does not
+abort it; the robot goes to RESTING and the next command stands it up again. Optionally the Pi can request an
 immediate power-down with a flag, and a request for torque-off while MOVING is
 honored only after STOPPING and SITDOWN complete (except an e-stop, which
 bypasses and drops torque; backlog T5.6).
 
-❓ **D5 — what counts as "no input".** A live Pi sending zero twist and a dead
-Pi look the same to the idle timer in this design. Alternative: use a longer
-`T_IDLE` when the link is alive but quiet, and a short one when it is lost.
+**D5 — what counts as "no input" (accepted).** There is a single idle time, the
+time spent standing. A live Pi sending zero twist and a dead link are treated
+the same, and a lost link makes the robot go to STANDING first (§3.3).
 
 ---
 
@@ -504,10 +555,10 @@ independent of this design and goes first regardless.
 | D2 | Stride at very low speed | **Accepted** | Constant stride above `v_crit`, proportional below |
 | D3 | Build the gait clock now, or stay event-driven until ripple | **Accepted** | Build the clock now |
 | D4 | React to touchdown at 10 Hz, or raise rates / servo-side stop | **Recommendation** | Control 25 Hz, servo 50 Hz, slow final approach, bus 2 Mbps; escalate only if measured (§7.5, Appendices A, B). Requires non-blocking logging (T1.6) |
-| D5 | Does idle time depend on whether the link is alive | ❓ Open | Single `T_IDLE` to start; revisit |
+| D5 | Does idle time depend on whether the link is alive | **Accepted** | No. `T_IDLE` is the time spent standing; a lost link makes the robot stop and stand, then the same timer runs (§3.3, §8.3) |
 | D6 | Rest pose: belly on the ground or body low on legs | **Accepted** (see note) | Body rests on the ground and all servos can be unloaded there |
-| D7 | Does the Pi need full telemetry (pose, battery) or just state and faults | ❓ Open | Start with state, fault, yaw, contact bits |
-| D8 | Where does the load baseline calibration run | ❓ Open | Every standup, in the air or by per-leg lift test |
+| D7 | Does the Pi need full telemetry (pose, battery) or just state and faults | **Accepted** | Eventually full telemetry: path planning and higher functions stay on the Pi. Versioned status frame, v1 = state, fault, yaw, contact bits (§3.2) |
+| D8 | Where does the load baseline calibration run | **Accepted** | Per-leg lift test at the first controller start (first STANDUP) after an MCU reset, not at every standup (§7.6) |
 
 D6 note: the reply was a plain "yes" to the question "can the body rest on the
 ground and can all servos be unloaded there"; if that reading is wrong,
@@ -517,7 +568,8 @@ SITDOWN/RESTING (§8) must be revisited.
 
 ## 12. Not in scope
 
-Terrain adaptation beyond touchdown (rough terrain footholds, body leveling on
+Path planning, navigation and mapping (these stay on the Raspberry Pi, D7),
+terrain adaptation beyond touchdown (rough terrain footholds, body leveling on
 slopes beyond using the IMU for the level frame), obstacle perception, and
 battery management. The design leaves room for them (the contact and level-frame
 machinery are prerequisites) but does not specify them.
