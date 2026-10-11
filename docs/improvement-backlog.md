@@ -44,7 +44,7 @@ motion-profile work (T4.x) is specified in
 | Phase | Theme | Active items |
 |------:|-------|-------------:|
 | 1 | Foundations and safety | 14 (1 done) |
-| 2 | Servo bus and actuation | 6 |
+| 2 | Servo bus and actuation | 7 |
 | 3 | Command interface | 1 |
 | 4 | Frames, sensing and contact | 5 |
 | 5 | Motion core | 4 |
@@ -96,7 +96,8 @@ and T7.12 is done, all verified on the robot (commits `2b0e064`, `d6c1be3`,
 | T4.2 | 2 | Open | Depends on T4.1. |
 | T7.2 | 2 | Open | New. |
 | T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
-| T7.4 | 2 | Partial | New. Load, velocity and position come back in one 10-byte Sync Read and are published. First run on the robot: values and timing as expected; byte stuffing bug found and fixed (library `0a49c5c`), waiting for a log to confirm. |
+| T7.4 | 2 | Partial | New. Load, velocity and position come back in one 10-byte Sync Read and are published. First runs on the robot: values and timing as expected; the byte stuffing bug is fixed (library `0a49c5c`) and confirmed (0 failures in 2,950 reads). Open: units and longer runs. |
+| T7.13 | 2 | Open | New, low priority. Byte stuffing in the library costs ~0.12 ms per bus transaction in the Debug build; do it in one pass. |
 | T7.5 | 3 | Open | New. Today: 7-byte single-parameter frames, no CRC, no reply. |
 | T5.1 | 4 | Open | Reach radius is a fixed 40 mm. |
 | T5.2 | 4 | Open | `attitude` still discarded (`(void)attitude`). |
@@ -570,6 +571,43 @@ critical-section helpers. No behavior change yet.
 - *Bench:* log femur and tibia load with the robot standing and with a leg
   lifted; the loaded leg should show a clear difference.
 - *Bench:* servo loop period unchanged with the larger read.
+
+
+### T7.13 — Single-pass byte stuffing in the dynamixel library
+
+**Priority:** low, for later. **Effort:** S.
+**Source:** log analysis of 2026-10-11, after the byte stuffing fix (library
+`0a49c5c`, T7.4).
+
+**Why.** With stuffing support the Sync Read went from 3.61–3.65 ms to
+3.74–3.77 ms and the Sync Write from 0.83 ms to 0.96 ms on average. The wire
+time did not change, so the extra ~0.12–0.13 ms per transaction is CPU time:
+stuffing and un-stuffing run as byte-by-byte loops that call a helper per byte,
+and `dynamixel_build_packet` scans the parameters twice (once to size, once to
+copy). In the unoptimised Debug build that is about 1.2 % of one core at the
+50 Hz servo loop. It is harmless today but it adds to every transaction, and it
+grows with the number of servos and the payload (T4.2 writes 8–12 bytes per
+servo).
+
+**Do** (all in the `dynamixel` library):
+1. `dynamixel_build_packet`: copy the parameters and stuff them in one pass,
+   then patch the length field and compute the CRC. Check the buffer against the
+   worst case up front (`param_length + param_length / 3`) so the size does not
+   need a first pass, or check as it writes.
+2. Fast path: if the parameters contain no `0xFF` (`memchr`), which is nearly
+   always the case for goal data, use `memcpy` and skip the scan. Same for
+   `dynamixel_unstuff`: no `0xFF` means nothing to remove.
+3. Keep `dynamixel_stuffed_length` for callers that need the size, but do not
+   call it from the packet builder.
+4. Optionally add a Release build preset in the firmware and compare, since much
+   of the cost is `-O0`.
+
+**Verify.**
+- *Static:* the library tests pass unchanged (143), including the randomized
+  round trip against the reference implementation; add a test for the worst
+  case buffer bound.
+- *Bench:* the 30 s diagnostics (T7.12) show the Sync Read back at about
+  3.6 ms and the Sync Write at about 0.83 ms.
 
 
 ### T4.2 — Phase 2: Per-joint synchronized profile
