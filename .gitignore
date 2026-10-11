@@ -7,3 +7,8 @@ cmake-build-*/
 
 # Mac
 .DS_Store
+
+# Serial capture, editor state and Python bytecode
+tio-output.log
+.obsidian/
+__pycache__/
