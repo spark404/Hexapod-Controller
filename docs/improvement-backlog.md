@@ -96,7 +96,7 @@ and T7.12 is done, all verified on the robot (commits `2b0e064`, `d6c1be3`,
 | T4.2 | 2 | Open | Depends on T4.1. |
 | T7.2 | 2 | Open | New. |
 | T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
-| T7.4 | 2 | Partial | New. Load, velocity and position come back in one 10-byte Sync Read (library `5b681c9`) and are published; not yet checked on the robot (units, signs, timing). |
+| T7.4 | 2 | Partial | New. Load, velocity and position come back in one 10-byte Sync Read and are published. First run on the robot: values and timing as expected; byte stuffing bug found and fixed (library `0a49c5c`), waiting for a log to confirm. |
 | T7.5 | 3 | Open | New. Today: 7-byte single-parameter frames, no CRC, no reply. |
 | T5.1 | 4 | Open | Reach radius is a fixed 40 mm. |
 | T5.2 | 4 | Open | `attitude` still discarded (`(void)attitude`). |
@@ -527,6 +527,27 @@ the compensated joint frame (`compensate()` flips the femur sign). A
 `[LOAD] f/t %: ...` debug line with the femur and tibia load of all legs is
 printed every 5 s. Open: the bench checks below, and confirming the register
 addresses and units against the control table (they are from memory).
+
+**First run on the robot (log of 2026-10-11).** Read time 3.49/3.61–3.65/3.94 ms
+(min/avg/max), as modelled (3.72 ms). No CRC errors, UART errors, dropped bytes
+or alerts. Two findings:
+- *Byte stuffing.* Dozens of `Failed to read all servos (error 71)` (length
+  mismatch), worst while the robot moved or was lifted. Cause: the servo inserts
+  an extra `0xFD` after every `FF FF FD` in a reply; a small negative velocity
+  (`FF FF FF FF`) followed by a position whose low byte is `FD` triggers it, and
+  the library did not remove it. Reproduced with a hand-built reply, fixed in
+  the library (`0a49c5c`: stuffing of requests, un-stuffing of replies) and the
+  firmware pin bumped. To confirm: the next log should have no `len` errors.
+- *Rare timeouts.* About one per 3,000 cycles, always blamed on servo index 0,
+  which means no reply at all (the request was lost or the first reply was
+  missed). Each costs the 10 ms timeout and the 5 ms reset, and shows as one
+  loop overrun. Not explained yet; the earlier 4,500-read window had none.
+
+Load observations, servo frame, % of maximum (design §7.1): standing, femur
+−11 to −20 and tibia −12 to +2; lifted, femur −3 to +3 and tibia −8 to 0. The
+femur separates loaded from unloaded clearly, the tibia hardly. The values are
+sticky: they hold for tens of seconds and drift slowly, depending on the last
+movement.
 
 Behavior changes that came with it:
 - A servo that does not answer in a cycle now keeps its own last position; the

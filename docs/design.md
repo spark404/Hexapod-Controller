@@ -334,6 +334,15 @@ motion profile. It is useful as a *change* indicator relative to a baseline,
 not as a calibrated force. The specific register address and units must be
 confirmed against the XL430 control table before implementation.
 
+**First measurements (2026-10-11, servo frame, % of maximum).** Standing: femur
+−11 to −20, tibia −12 to +2. Lifted by hand: femur −3 to +3, tibia −8 to 0. So the
+femur load separates loaded from unloaded legs clearly (10 to 17 points), and
+the tibia load hardly does: detection should be based mainly on the femur. The
+readings are sticky, they hold for tens of seconds and drift slowly with the
+last movement (static friction in the position controller), so the baseline
+from the lift test (§7.6) has to be taken with the same approach direction that
+detection will see, or the threshold needs margin for the hysteresis.
+
 Plan: read load for the femur and tibia of every leg in the existing 50 Hz
 servo bus read (adds a few bytes per servo; bandwidth impact is small). The
 coxa joint is horizontal and mostly insensitive to ground load.
@@ -707,6 +716,12 @@ predicted, 3,180 µs measured; Sync Write 580 µs predicted, 796 µs measured.
 - The jitter is small (reads within about 180 µs, writes within 85 µs).
 - Only successful transactions are timed. Failed ones would show the 10 ms
   timeout and distort the figures.
+
+With the 10-byte read of load, velocity and position (T7.4) the Sync Read takes
+3.49/3.61–3.65/3.94 ms (min/avg/max), against 3.72 ms from the calibrated model;
+the Sync Write stays at 0.83 ms. The reply of a servo is stuffed when its data
+holds `FF FF FD` (see the library notes), which made the first runs report
+length mismatches until the library handled it.
 
 ---
 
