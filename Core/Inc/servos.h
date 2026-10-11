@@ -15,6 +15,10 @@
 typedef struct {
     float32_t actual_joint_angles[6][3];
     float32_t target_joint_angles[6][3];
+    /* As reported by the servos, in the servo frame: the signs are NOT the
+     * compensated joint frame of the angles above (see compensate()). */
+    float32_t load_pct[6][3];          /* Present Load, % of the maximum torque, signed */
+    float32_t velocity_radps[6][3];    /* Present Velocity, rad/s, signed */
     bool initialized;
     bool request_powerdown;
     bool limit_alert_enabled;
@@ -32,6 +36,8 @@ typedef enum {
 } servo_state_t;
 
 float32_t xl430_pulse_to_rad_centered(const uint16_t pulse);
+float32_t xl430_load_to_percent(const int16_t raw);
+float32_t xl430_velocity_to_radps(const int32_t raw);
 uint16_t xl430_rad_centered_to_pulse(const float32_t rad);
 
 void compensate(const float32_t src[3], float32_t dst[3]);
@@ -41,6 +47,9 @@ void servo_copy_actual_joint_angles(float32_t dst[6][3], const servo_shared_stat
 void servo_set_target_joint_angles(servo_shared_state_t *state, float32_t src[6][3]);
 void servo_set_actual_joint_angles(servo_shared_state_t *state, float32_t src[6][3]);
 void servo_set_actual_and_target_joint_angles(servo_shared_state_t *state, float32_t src[6][3]);
+void servo_copy_load(float32_t dst[6][3], const servo_shared_state_t *state);
+void servo_copy_velocity(float32_t dst[6][3], const servo_shared_state_t *state);
+void servo_set_load_and_velocity(servo_shared_state_t *state, float32_t load[6][3], float32_t velocity[6][3]);
 void servo_get_flags(const servo_shared_state_t *state, bool *request_powerdown, bool *limit_alert_enabled);
 void servo_set_request_powerdown(servo_shared_state_t *state, bool request_powerdown);
 void servo_set_limit_alert_enabled(servo_shared_state_t *state, bool limit_alert_enabled);

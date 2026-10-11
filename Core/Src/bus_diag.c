@@ -16,6 +16,7 @@ typedef struct {
     uint32_t time_min_us[BUS_OP_COUNT];
     uint32_t time_max_us[BUS_OP_COUNT];
     uint32_t events[BUS_EV_COUNT];
+    uint32_t servo_fail[BUS_DIAG_MAX_SERVOS];
     uint32_t max_streak;
     uint32_t last_error;
 } bus_diag_state_t;
@@ -53,6 +54,8 @@ static bus_res_t map_result(const uint8_t dnm_result)
         case DNM_LL_ERR:          return BUS_RES_LL_ERR;
         case DNM_LL_TIMEOUT:      return BUS_RES_TIMEOUT;
         case DNM_API_ERR:         return BUS_RES_API;
+        case DNM_RECV_ID_MISMATCH:     return BUS_RES_ID;
+        case DNM_RECV_LENGTH_MISMATCH: return BUS_RES_LENGTH;
         default:                  return BUS_RES_OTHER;
     }
 }
@@ -87,6 +90,14 @@ void bus_diag_record(const bus_op_t op, const uint8_t dnm_result, const uint32_t
     }
 }
 
+void bus_diag_servo_failure(const unsigned servo_index)
+{
+    if (servo_index >= BUS_DIAG_MAX_SERVOS) {
+        return;
+    }
+    atomic_add(&g_diag.servo_fail[servo_index], 1);
+}
+
 void bus_diag_event(const bus_event_t ev, const uint32_t n)
 {
     if ((unsigned) ev >= (unsigned) BUS_EV_COUNT) {
@@ -112,6 +123,9 @@ void bus_diag_snapshot(bus_diag_snapshot_t *out, const bool reset_window)
     }
     for (int e = 0; e < BUS_EV_COUNT; e++) {
         out->events[e] = __atomic_load_n(&g_diag.events[e], RELAXED);
+    }
+    for (int s = 0; s < BUS_DIAG_MAX_SERVOS; s++) {
+        out->servo_fail[s] = __atomic_load_n(&g_diag.servo_fail[s], RELAXED);
     }
     if (reset_window) {
         out->max_streak = __atomic_exchange_n(&g_diag.max_streak, 0U, RELAXED);
@@ -175,12 +189,12 @@ void bus_diag_format(const bus_diag_snapshot_t *prev, const bus_diag_snapshot_t 
 
     char rd_us[32];
     char wr_us[32];
-    format_timing(rd_us, sizeof(rd_us), prev, cur, BUS_OP_READ_POS);
+    format_timing(rd_us, sizeof(rd_us), prev, cur, BUS_OP_READ_STATE);
     format_timing(wr_us, sizeof(wr_us), prev, cur, BUS_OP_WRITE_GOAL);
 
-    const uint32_t rd_n = delta(res_total(cur, BUS_OP_READ_POS), res_total(prev, BUS_OP_READ_POS));
+    const uint32_t rd_n = delta(res_total(cur, BUS_OP_READ_STATE), res_total(prev, BUS_OP_READ_STATE));
     const uint32_t wr_n = delta(res_total(cur, BUS_OP_WRITE_GOAL), res_total(prev, BUS_OP_WRITE_GOAL));
-    const uint32_t rd_fail = delta(res_failed(cur, BUS_OP_READ_POS), res_failed(prev, BUS_OP_READ_POS));
+    const uint32_t rd_fail = delta(res_failed(cur, BUS_OP_READ_STATE), res_failed(prev, BUS_OP_READ_STATE));
     const uint32_t wr_fail = delta(res_failed(cur, BUS_OP_WRITE_GOAL), res_failed(prev, BUS_OP_WRITE_GOAL));
 
     uint32_t events_in_window = 0;
@@ -198,11 +212,12 @@ void bus_diag_format(const bus_diag_snapshot_t *prev, const bus_diag_snapshot_t 
 
     if (out->window_errors) {
         snprintf(out->protocol, sizeof(out->protocol),
-                 "[Bus] rd err: crc %lu notstatus %lu ll %lu timeout %lu api %lu other %lu"
+                 "[Bus] rd err: crc %lu notstatus %lu ll %lu timeout %lu api %lu id %lu len %lu other %lu"
                  " | wr err: crc %lu notstatus %lu ll %lu timeout %lu api %lu other %lu | last code %lu",
-                 DR(BUS_OP_READ_POS, BUS_RES_CRC), DR(BUS_OP_READ_POS, BUS_RES_NOT_STATUS),
-                 DR(BUS_OP_READ_POS, BUS_RES_LL_ERR), DR(BUS_OP_READ_POS, BUS_RES_TIMEOUT),
-                 DR(BUS_OP_READ_POS, BUS_RES_API), DR(BUS_OP_READ_POS, BUS_RES_OTHER),
+                 DR(BUS_OP_READ_STATE, BUS_RES_CRC), DR(BUS_OP_READ_STATE, BUS_RES_NOT_STATUS),
+                 DR(BUS_OP_READ_STATE, BUS_RES_LL_ERR), DR(BUS_OP_READ_STATE, BUS_RES_TIMEOUT),
+                 DR(BUS_OP_READ_STATE, BUS_RES_API), DR(BUS_OP_READ_STATE, BUS_RES_ID),
+                 DR(BUS_OP_READ_STATE, BUS_RES_LENGTH), DR(BUS_OP_READ_STATE, BUS_RES_OTHER),
                  DR(BUS_OP_WRITE_GOAL, BUS_RES_CRC), DR(BUS_OP_WRITE_GOAL, BUS_RES_NOT_STATUS),
                  DR(BUS_OP_WRITE_GOAL, BUS_RES_LL_ERR), DR(BUS_OP_WRITE_GOAL, BUS_RES_TIMEOUT),
                  DR(BUS_OP_WRITE_GOAL, BUS_RES_API), DR(BUS_OP_WRITE_GOAL, BUS_RES_OTHER),
@@ -211,23 +226,46 @@ void bus_diag_format(const bus_diag_snapshot_t *prev, const bus_diag_snapshot_t 
         snprintf(out->transport, sizeof(out->transport),
                  "[Bus] io: rd mutex %lu empty %lu partial %lu | wr mutex %lu txq %lu txtmo %lu"
                  " | uart ore %lu fe %lu ne %lu pe %lu dma %lu | rx dropped %lu B"
-                 " | dma resets: after read %lu, after uart err %lu",
+                 " | dma resets: after read %lu, after uart err %lu | servo alerts %lu",
                  DE(BUS_EV_RD_MUTEX_TMO), DE(BUS_EV_RD_EMPTY), DE(BUS_EV_RD_PARTIAL),
                  DE(BUS_EV_WR_MUTEX_TMO), DE(BUS_EV_WR_TXQ_FULL), DE(BUS_EV_WR_TX_TMO),
                  DE(BUS_EV_UART_ORE), DE(BUS_EV_UART_FE), DE(BUS_EV_UART_NE), DE(BUS_EV_UART_PE),
                  DE(BUS_EV_UART_DMA), DE(BUS_EV_RX_DROP),
-                 DE(BUS_EV_RESET_READ_FAIL), DE(BUS_EV_RESET_UART_ERR));
+                 DE(BUS_EV_RESET_READ_FAIL), DE(BUS_EV_RESET_UART_ERR), DE(BUS_EV_SERVO_ALERT));
+    }
+
+    /* Which servos did not give data in this window, only worth a line when one failed */
+    size_t used = 0;
+    for (int s = 0; s < BUS_DIAG_MAX_SERVOS; s++) {
+        const uint32_t d = delta(cur->servo_fail[s], prev->servo_fail[s]);
+        if (d == 0 || used >= sizeof(out->servos)) {
+            continue;
+        }
+        if (used == 0) {
+            used = (size_t) snprintf(out->servos, sizeof(out->servos),
+                                     "[Bus] reads without data per servo (leg*3+joint):");
+        }
+        const int written = snprintf(out->servos + used, sizeof(out->servos) - used, " %d:%lu", s, (unsigned long) d);
+        if (written > 0) {
+            used += (size_t) written;
+        }
+    }
+    if (used >= sizeof(out->servos)) {
+        out->servos[sizeof(out->servos) - 1] = '\0';
+    }
+    if (out->servos[0] != '\0') {
+        out->window_errors = true;
     }
 
     /* Totals since boot, only worth printing once something has gone wrong */
-    const uint32_t total_rd_fail = res_failed(cur, BUS_OP_READ_POS);
+    const uint32_t total_rd_fail = res_failed(cur, BUS_OP_READ_STATE);
     const uint32_t total_wr_fail = res_failed(cur, BUS_OP_WRITE_GOAL);
     const uint32_t uart_errs = events_total(cur, BUS_EV_UART_ORE, BUS_EV_UART_DMA);
     const uint32_t resets = events_total(cur, BUS_EV_RESET_READ_FAIL, BUS_EV_RESET_UART_ERR);
     if (total_rd_fail + total_wr_fail + uart_errs + resets + cur->events[BUS_EV_RX_DROP] != 0) {
         snprintf(out->boot, sizeof(out->boot),
                  "[Bus] since boot: rd failed %lu/%lu, wr failed %lu/%lu, uart errors %lu, rx dropped %lu B, dma resets %lu",
-                 (unsigned long) total_rd_fail, (unsigned long) res_total(cur, BUS_OP_READ_POS),
+                 (unsigned long) total_rd_fail, (unsigned long) res_total(cur, BUS_OP_READ_STATE),
                  (unsigned long) total_wr_fail, (unsigned long) res_total(cur, BUS_OP_WRITE_GOAL),
                  (unsigned long) uart_errs, (unsigned long) cur->events[BUS_EV_RX_DROP],
                  (unsigned long) resets);

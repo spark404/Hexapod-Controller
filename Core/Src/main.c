@@ -1814,14 +1814,89 @@ static uint32_t diag_elapsed_us(const uint32_t start_cycles)
     return (DWT->CYCCNT - start_cycles) / (SystemCoreClock / 1000000U);
 }
 
-/** Sync Read of the present position of all servos, timed and counted. */
-static dynamixel_result_t servo_bus_read_positions(uint32_t *values)
+/* Present Load (126, 2 bytes), Present Velocity (128, 4) and Present Position
+ * (132, 4) are adjacent: one 10 byte read per servo gets all three. */
+#define XL430_STATE_LEN 10
+#define XL430_STATUS_ALERT 0x80
+
+/** What one read of the state of all servos returned. Indexed [leg][joint]. */
+typedef struct {
+    uint32_t position[6][3];    /* pulses */
+    float32_t load[6][3];       /* % of maximum, servo frame */
+    float32_t velocity[6][3];   /* rad/s, servo frame */
+    bool valid[6][3];           /* this servo returned data; otherwise the values above are untouched */
+    bool link_error;            /* a timeout or bus error: the receiver needs a reset */
+} servo_read_t;
+
+/**
+ * Sync Read of load, velocity and position of all servos, timed and counted.
+ *
+ * Servos that returned data (including those reporting a hardware alert, whose
+ * data is valid) are decoded into *out; the others are left untouched, so the
+ * caller keeps their previous values. The return value is DNM_OK when every
+ * servo returned data, otherwise the first reason a servo did not.
+ */
+static dynamixel_result_t servo_bus_read_state(servo_read_t *out)
 {
+    static uint32_t alert_mask;     /* servos reporting an alert, to log changes only */
+
+    uint8_t data[18 * XL430_STATE_LEN];
+    dynamixel_result_t status[18];
+
     const uint32_t start = DWT->CYCCNT;
-    const dynamixel_result_t res = dynamixel_get_long_parameter_multiple(
-        dynamixel_servos, 18, XL430_CT_RAM_PRESENT_POSITION, values);
-    bus_diag_record(BUS_OP_READ_POS, res, diag_elapsed_us(start));
-    return res;
+    (void) dynamixel_get_bytes_multiple(dynamixel_servos, 18, XL430_CT_RAM_PRESENT_LOAD,
+                                        XL430_STATE_LEN, data, status);
+    const uint32_t duration_us = diag_elapsed_us(start);
+
+    dynamixel_result_t outcome = DNM_OK;
+    uint32_t alerts = 0;
+    uint32_t new_alert_mask = 0;
+    bool link_blamed = false;
+    out->link_error = false;
+
+    for (int s = 0; s < 18; s++) {
+        const dynamixel_result_t st = status[s];
+        const bool usable = st == DNM_OK || st == XL430_STATUS_ALERT;
+        out->valid[s / 3][s % 3] = usable;
+
+        if (usable) {
+            const uint8_t *d = &data[s * XL430_STATE_LEN];
+            out->load[s / 3][s % 3] = xl430_load_to_percent(dynamixel_decode_i16(&d[0]));
+            out->velocity[s / 3][s % 3] = xl430_velocity_to_radps(dynamixel_decode_i32(&d[2]));
+            out->position[s / 3][s % 3] = dynamixel_decode_u32(&d[6]);
+            if (st == XL430_STATUS_ALERT) {
+                alerts++;
+                new_alert_mask |= 1UL << s;
+            }
+            continue;
+        }
+
+        if (outcome == DNM_OK) {
+            outcome = st;
+        }
+        if (st == DNM_LL_TIMEOUT || st == DNM_LL_ERR) {
+            // The servos behind a missing reply cannot answer either: blame only the first
+            out->link_error = true;
+            if (!link_blamed) {
+                bus_diag_servo_failure((unsigned) s);
+                link_blamed = true;
+            }
+        } else {
+            bus_diag_servo_failure((unsigned) s);
+        }
+    }
+
+    if (alerts > 0) {
+        bus_diag_event(BUS_EV_SERVO_ALERT, alerts);
+    }
+    if (new_alert_mask != alert_mask) {
+        LOG_WARN("[ServoTask] servo hardware alert mask 0x%05lx (was 0x%05lx), servo index = leg*3+joint",
+                 (unsigned long) new_alert_mask, (unsigned long) alert_mask);
+        alert_mask = new_alert_mask;
+    }
+
+    bus_diag_record(BUS_OP_READ_STATE, outcome, duration_us);
+    return outcome;
 }
 
 /** Sync Write of the goal position of all servos, timed and counted. */
@@ -1882,6 +1957,9 @@ void StartDefaultTask(void *argument)
                 LOG_WARN("%s", diag_report.summary);
                 LOG_WARN("%s", diag_report.protocol);
                 LOG_WARN("%s", diag_report.transport);
+                if (diag_report.servos[0] != '\0') {
+                    LOG_WARN("%s", diag_report.servos);
+                }
             } else {
                 LOG_INFO("%s", diag_report.summary);
             }
@@ -1891,6 +1969,15 @@ void StartDefaultTask(void *argument)
         }
 
         // FIXME clock is a horrible way to print data periodically, do better.
+        if (clock % 5 == 0) {
+            // Femur and tibia load of every leg, % of maximum, servo frame
+            float32_t load[6][3];
+            servo_copy_load(load, &servo_shared_state);
+            LOG_DEBUG("[LOAD] f/t %%: L0 %.1f/%.1f L1 %.1f/%.1f L2 %.1f/%.1f L3 %.1f/%.1f L4 %.1f/%.1f L5 %.1f/%.1f",
+                load[0][1], load[0][2], load[1][1], load[1][2], load[2][1], load[2][2],
+                load[3][1], load[3][2], load[4][1], load[4][2], load[5][1], load[5][2]);
+        }
+
         if (clock % (5 * 5) == 0) {
             LOG_INFO("[GYR] x %5.2f, y %5.2f, z %5.2f",
                 gyro_snapshot[0], gyro_snapshot[1], gyro_snapshot[2]);
@@ -2565,6 +2652,11 @@ void StartServoTask(void *argument)
     bool request_powerdown = false;
     bool limit_alert_enabled = false;
 
+    // Last values read from each servo, kept so that a servo that does not
+    // answer in one cycle keeps its previous value
+    servo_read_t servo_read = {0};
+    float32_t servo_angles_rad[6][3] = {{0.0f}};   // servo frame, before compensate()
+
     osEventFlagsWait(systemEventsHandle, EVT_UART_READY, osFlagsWaitAll, osWaitForever);
 
     uint32_t tick_count = osKernelGetTickCount();
@@ -2596,21 +2688,23 @@ void StartServoTask(void *argument)
             // A) Read the actual positions from the servos
             //    - Convert pulses to rad
             //    - Compensate for geometry
-            const dynamixel_result_t res = servo_bus_read_positions(&values[0][0]);
+            //    We need every servo here: the targets start from what was read
+            const dynamixel_result_t res = servo_bus_read_state(&servo_read);
             if (res != DNM_OK) {
                 LOG_ERROR("[ServoTask] Failed to read actual servo positions [%d]", res);
                 break;
             };
 
             for (int i=0; i<6; i++) {
-                angles[i][0] = xl430_pulse_to_rad_centered(values[i][0]);
-                angles[i][1] = xl430_pulse_to_rad_centered(values[i][1]);
-                angles[i][2] = xl430_pulse_to_rad_centered(values[i][2]);
-                compensate(angles[i], joint_angles[i]);
+                for (int j=0; j<3; j++) {
+                    servo_angles_rad[i][j] = xl430_pulse_to_rad_centered(servo_read.position[i][j]);
+                }
+                compensate(servo_angles_rad[i], joint_angles[i]);
             }
 
             // B) Update the shared state to the current state of the hardware
             servo_set_actual_and_target_joint_angles(&servo_shared_state, joint_angles);
+            servo_set_load_and_velocity(&servo_shared_state, servo_read.load, servo_read.velocity);
 
             // C) Proceed to the next state
             state = SERVO_SYNC_TO_HW;
@@ -2642,26 +2736,32 @@ void StartServoTask(void *argument)
             // A) Read the actual positions from the servos
             //    - Convert pulses to rad
             //    - Compensate for geometry
-            dynamixel_result_t res = servo_bus_read_positions(&values[0][0]);
-            if (res == DNM_OK) {
-                for (int i=0; i<6; i++) {
-                    angles[i][0] = xl430_pulse_to_rad_centered(values[i][0]);
-                    angles[i][1] = xl430_pulse_to_rad_centered(values[i][1]);
-                    angles[i][2] = xl430_pulse_to_rad_centered(values[i][2]);
-                    compensate(angles[i], joint_angles[i]);
+            //    A servo that did not answer keeps its last known position
+            const dynamixel_result_t res = servo_bus_read_state(&servo_read);
+            for (int i=0; i<6; i++) {
+                for (int j=0; j<3; j++) {
+                    if (servo_read.valid[i][j]) {
+                        servo_angles_rad[i][j] = xl430_pulse_to_rad_centered(servo_read.position[i][j]);
+                    }
                 }
-            } else {
-                // Failed to read the hardware state, use last known state
-                LOG_WARN("[ServoTask] Failed to read servo positions (error %d), resetting UART", res);
-                servo_copy_actual_joint_angles(joint_angles, &servo_shared_state);
+                compensate(servo_angles_rad[i], joint_angles[i]);
+            }
+            servo_set_load_and_velocity(&servo_shared_state, servo_read.load, servo_read.velocity);
 
-                // Wait 5ms for any pending servo responses from the BULK_READ/SYNC_READ
-                // to arrive on the bus (18 servos may still be transmitting)
-                osDelay(5);
+            if (res != DNM_OK) {
+                LOG_WARN("[ServoTask] Failed to read all servos (error %d)%s", res,
+                         servo_read.link_error ? ", resetting UART" : "");
 
-                // Perform DMA recovery (mutex-protected)
-                bus_diag_event(BUS_EV_RESET_READ_FAIL, 1);
-                uart_rx_reset_dma();
+                if (servo_read.link_error) {
+                    // Wait 5ms for any pending servo responses from the BULK_READ/SYNC_READ
+                    // to arrive on the bus (18 servos may still be transmitting)
+                    osDelay(5);
+
+                    // Perform DMA recovery (mutex-protected)
+                    bus_diag_event(BUS_EV_RESET_READ_FAIL, 1);
+                    uart_rx_reset_dma();
+                }
+                // Damaged replies were read in full, the receiver is still in step
             };
 
             // B) Interpolate toward target

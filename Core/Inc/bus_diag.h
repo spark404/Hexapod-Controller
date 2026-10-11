@@ -24,9 +24,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Servos on the bus. Failures are counted per servo index (leg * 3 + joint). */
+#define BUS_DIAG_MAX_SERVOS 18
+
 /* Transactions that are timed and counted per operation */
 typedef enum {
-    BUS_OP_READ_POS = 0,    /* Sync Read of Present Position */
+    BUS_OP_READ_STATE = 0,  /* Sync Read of Present Load, Velocity and Position */
     BUS_OP_WRITE_GOAL,      /* Sync Write of Goal Position */
     BUS_OP_COUNT
 } bus_op_t;
@@ -39,6 +42,8 @@ typedef enum {
     BUS_RES_LL_ERR,         /* DNM_LL_ERR */
     BUS_RES_TIMEOUT,        /* DNM_LL_TIMEOUT */
     BUS_RES_API,            /* DNM_API_ERR */
+    BUS_RES_ID,             /* DNM_RECV_ID_MISMATCH */
+    BUS_RES_LENGTH,         /* DNM_RECV_LENGTH_MISMATCH */
     BUS_RES_OTHER,          /* any other non-zero code */
     BUS_RES_COUNT
 } bus_res_t;
@@ -59,6 +64,7 @@ typedef enum {
     BUS_EV_RX_DROP,          /* received bytes dropped, RX ring full (counts bytes) */
     BUS_EV_RESET_READ_FAIL,  /* RX DMA reset after a failed servo read */
     BUS_EV_RESET_UART_ERR,   /* RX DMA reset after a UART error */
+    BUS_EV_SERVO_ALERT,      /* servo reported a hardware alert in a read (the data is valid) */
     BUS_EV_LOOP_OVERRUN,     /* servo loop iteration took longer than its period */
     BUS_EV_COUNT
 } bus_event_t;
@@ -71,6 +77,7 @@ typedef struct {
     uint32_t time_min_us[BUS_OP_COUNT];     /* UINT32_MAX when none */
     uint32_t time_max_us[BUS_OP_COUNT];
     uint32_t events[BUS_EV_COUNT];
+    uint32_t servo_fail[BUS_DIAG_MAX_SERVOS]; /* reads without data, per servo index */
     uint32_t max_streak;                    /* longest run of failed transactions */
     uint32_t last_error;                    /* last non-zero dynamixel result code */
 } bus_diag_snapshot_t;
@@ -80,6 +87,7 @@ typedef struct {
     char summary[224];      /* always filled */
     char protocol[224];     /* per result code detail, only with errors in the window */
     char transport[224];    /* transport and UART detail, only with errors in the window */
+    char servos[160];       /* failed reads per servo, only when a servo failed in the window */
     char boot[160];         /* totals since boot, only when any error happened */
     bool window_errors;     /* any failure or event in the window */
 } bus_diag_report_t;
@@ -89,6 +97,11 @@ void bus_diag_init(void);
 /* Record one finished transaction. dnm_result is the dynamixel result code
  * (0 = ok). duration_us is only used for successful transactions. */
 void bus_diag_record(bus_op_t op, uint8_t dnm_result, uint32_t duration_us);
+
+/* Count a read that gave no data for servo number servo_index (0..17). For a
+ * timeout, only the servo that did not answer should be counted, not the ones
+ * behind it that could not answer either. */
+void bus_diag_servo_failure(unsigned servo_index);
 
 /* Add n occurrences of an event */
 void bus_diag_event(bus_event_t ev, uint32_t n);

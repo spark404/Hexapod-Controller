@@ -15,10 +15,25 @@
 #define FEMUR_OFFSET_ANGLE_RAD 0.436332313f
 #define TWO_PI (2.0f * (float)M_PI)
 
+/* Present Load is in units of 0.1 % of the maximum, Present Velocity in units
+ * of 0.229 rev/min (XL430 control table; confirm on the bench). */
+#define XL430_LOAD_UNIT_PCT 0.1f
+#define XL430_VELOCITY_UNIT_RADPS (0.229f * TWO_PI / 60.0f)
+
 float32_t xl430_pulse_to_rad_centered(const uint16_t pulse)
 {
     const int32_t signed_pulse = (int32_t)pulse - 2048;
     return ((float32_t)signed_pulse * TWO_PI) / XL430_RESOLUTION;
+}
+
+float32_t xl430_load_to_percent(const int16_t raw)
+{
+    return (float32_t)raw * XL430_LOAD_UNIT_PCT;
+}
+
+float32_t xl430_velocity_to_radps(const int32_t raw)
+{
+    return (float32_t)raw * XL430_VELOCITY_UNIT_RADPS;
 }
 
 uint16_t xl430_rad_centered_to_pulse(const float32_t rad)
@@ -95,6 +110,40 @@ void servo_set_actual_and_target_joint_angles(servo_shared_state_t *state, float
         for (int j = 0; j < 3; j++) {
             state->actual_joint_angles[i][j] = src[i][j];
             state->target_joint_angles[i][j] = src[i][j];
+        }
+    }
+    taskEXIT_CRITICAL();
+}
+
+void servo_copy_load(float32_t dst[6][3], const servo_shared_state_t *state)
+{
+    taskENTER_CRITICAL();
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < 3; j++) {
+            dst[i][j] = state->load_pct[i][j];
+        }
+    }
+    taskEXIT_CRITICAL();
+}
+
+void servo_copy_velocity(float32_t dst[6][3], const servo_shared_state_t *state)
+{
+    taskENTER_CRITICAL();
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < 3; j++) {
+            dst[i][j] = state->velocity_radps[i][j];
+        }
+    }
+    taskEXIT_CRITICAL();
+}
+
+void servo_set_load_and_velocity(servo_shared_state_t *state, float32_t load[6][3], float32_t velocity[6][3])
+{
+    taskENTER_CRITICAL();
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < 3; j++) {
+            state->load_pct[i][j] = load[i][j];
+            state->velocity_radps[i][j] = velocity[i][j];
         }
     }
     taskEXIT_CRITICAL();

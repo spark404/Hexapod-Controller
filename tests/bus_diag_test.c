@@ -22,7 +22,7 @@ static void test_clean_window(void)
     bus_diag_snapshot(&prev, true);
 
     for (int i = 0; i < 100; i++) {
-        bus_diag_record(BUS_OP_READ_POS, DNM_OK, 2000 + (uint32_t) i);   /* 2000..2099 */
+        bus_diag_record(BUS_OP_READ_STATE, DNM_OK, 2000 + (uint32_t) i);   /* 2000..2099 */
         bus_diag_record(BUS_OP_WRITE_GOAL, DNM_OK, 500);
     }
     bus_diag_snapshot(&cur, true);
@@ -42,13 +42,13 @@ static void test_failures_and_streak(void)
     bus_diag_report_t rep;
     bus_diag_snapshot(&prev, true);
 
-    bus_diag_record(BUS_OP_READ_POS, DNM_OK, 2000);
-    bus_diag_record(BUS_OP_READ_POS, DNM_LL_TIMEOUT, 10000);    /* streak 1 */
-    bus_diag_record(BUS_OP_READ_POS, DNM_RECV_CRC_FAIL, 2100);  /* streak 2 */
+    bus_diag_record(BUS_OP_READ_STATE, DNM_OK, 2000);
+    bus_diag_record(BUS_OP_READ_STATE, DNM_LL_TIMEOUT, 10000);    /* streak 1 */
+    bus_diag_record(BUS_OP_READ_STATE, DNM_RECV_CRC_FAIL, 2100);  /* streak 2 */
     bus_diag_record(BUS_OP_WRITE_GOAL, DNM_LL_ERR, 100);        /* streak 3 */
-    bus_diag_record(BUS_OP_READ_POS, DNM_OK, 3000);             /* streak reset */
-    bus_diag_record(BUS_OP_READ_POS, DNM_RECV_NOT_STATUS, 0);   /* streak 1 */
-    bus_diag_record(BUS_OP_READ_POS, 123, 0);                   /* unknown code -> other */
+    bus_diag_record(BUS_OP_READ_STATE, DNM_OK, 3000);             /* streak reset */
+    bus_diag_record(BUS_OP_READ_STATE, DNM_RECV_NOT_STATUS, 0);   /* streak 1 */
+    bus_diag_record(BUS_OP_READ_STATE, 123, 0);                   /* unknown code -> other */
     bus_diag_event(BUS_EV_UART_FE, 2);
     bus_diag_event(BUS_EV_RESET_READ_FAIL, 3);
     bus_diag_event(BUS_EV_RX_DROP, 17);
@@ -63,7 +63,7 @@ static void test_failures_and_streak(void)
     assert(strstr(rep.summary, "wr 1 ok 0 (us -)") != NULL);
     assert(strstr(rep.summary, "max fail streak 3") != NULL);
     assert(strstr(rep.summary, "loop overruns 1") != NULL);
-    assert(strstr(rep.protocol, "rd err: crc 1 notstatus 1 ll 0 timeout 1 api 0 other 1") != NULL);
+    assert(strstr(rep.protocol, "rd err: crc 1 notstatus 1 ll 0 timeout 1 api 0 id 0 len 0 other 1") != NULL);
     assert(strstr(rep.protocol, "wr err: crc 0 notstatus 0 ll 1") != NULL);
     assert(strstr(rep.protocol, "last code 123") != NULL);
     assert(strstr(rep.transport, "uart ore 0 fe 2") != NULL);
@@ -73,6 +73,39 @@ static void test_failures_and_streak(void)
     assert(strstr(rep.boot, "wr failed 1/1") != NULL);
 }
 
+static void test_new_result_codes_and_servo_attribution(void)
+{
+    bus_diag_init();
+    bus_diag_snapshot_t prev, cur;
+    bus_diag_report_t rep;
+    bus_diag_snapshot(&prev, true);
+
+    bus_diag_record(BUS_OP_READ_STATE, DNM_RECV_ID_MISMATCH, 0);
+    bus_diag_record(BUS_OP_READ_STATE, DNM_RECV_LENGTH_MISMATCH, 0);
+    bus_diag_servo_failure(7);
+    bus_diag_servo_failure(7);
+    bus_diag_servo_failure(12);
+    bus_diag_servo_failure(18);          /* out of range: ignored */
+    bus_diag_event(BUS_EV_SERVO_ALERT, 4);
+
+    bus_diag_snapshot(&cur, true);
+    bus_diag_format(&prev, &cur, 30, &rep);
+
+    assert(rep.window_errors);
+    assert(strstr(rep.protocol, "id 1 len 1 other 0") != NULL);
+    assert(strstr(rep.transport, "servo alerts 4") != NULL);
+    assert(strstr(rep.servos, "7:2") != NULL);
+    assert(strstr(rep.servos, "12:1") != NULL);
+    assert(strstr(rep.servos, "18:") == NULL);
+
+    /* a window without servo failures has no servo line, even though the totals remember */
+    bus_diag_snapshot_t next;
+    bus_diag_snapshot(&next, true);
+    bus_diag_format(&cur, &next, 30, &rep);
+    assert(rep.servos[0] == '\0');
+    assert(!rep.window_errors);
+}
+
 static void test_window_reset_and_deltas(void)
 {
     bus_diag_init();
@@ -80,14 +113,14 @@ static void test_window_reset_and_deltas(void)
     bus_diag_report_t rep;
     bus_diag_snapshot(&s0, true);
 
-    bus_diag_record(BUS_OP_READ_POS, DNM_LL_TIMEOUT, 0);
-    bus_diag_record(BUS_OP_READ_POS, DNM_OK, 4000);
+    bus_diag_record(BUS_OP_READ_STATE, DNM_LL_TIMEOUT, 0);
+    bus_diag_record(BUS_OP_READ_STATE, DNM_OK, 4000);
     bus_diag_snapshot(&s1, true);
 
     /* Second window is clean: deltas must not include the first window, and the
      * min/max/streak must have been reset by the snapshot */
-    bus_diag_record(BUS_OP_READ_POS, DNM_OK, 2000);
-    bus_diag_record(BUS_OP_READ_POS, DNM_OK, 2200);
+    bus_diag_record(BUS_OP_READ_STATE, DNM_OK, 2000);
+    bus_diag_record(BUS_OP_READ_STATE, DNM_OK, 2200);
     bus_diag_snapshot(&s2, true);
     bus_diag_format(&s1, &s2, 30, &rep);
 
@@ -109,12 +142,12 @@ static void test_counter_wrap(void)
     }
 
     /* 3 reads recorded across a wrap of the OK counter and of the time sum */
-    prev.res[BUS_OP_READ_POS][BUS_RES_OK] = UINT32_MAX - 1;
-    cur.res[BUS_OP_READ_POS][BUS_RES_OK] = 1;
-    prev.time_sum_us[BUS_OP_READ_POS] = UINT32_MAX - 2999;
-    cur.time_sum_us[BUS_OP_READ_POS] = 6000;    /* +9000 us over 3 reads */
-    cur.time_min_us[BUS_OP_READ_POS] = 2900;
-    cur.time_max_us[BUS_OP_READ_POS] = 3100;
+    prev.res[BUS_OP_READ_STATE][BUS_RES_OK] = UINT32_MAX - 1;
+    cur.res[BUS_OP_READ_STATE][BUS_RES_OK] = 1;
+    prev.time_sum_us[BUS_OP_READ_STATE] = UINT32_MAX - 2999;
+    cur.time_sum_us[BUS_OP_READ_STATE] = 6000;    /* +9000 us over 3 reads */
+    cur.time_min_us[BUS_OP_READ_STATE] = 2900;
+    cur.time_max_us[BUS_OP_READ_STATE] = 3100;
 
     bus_diag_format(&prev, &cur, 30, &rep);
     assert(strstr(rep.summary, "rd 3 ok 3 (us 2900/3000/3100)") != NULL);
@@ -124,6 +157,7 @@ int main(void)
 {
     test_clean_window();
     test_failures_and_streak();
+    test_new_result_codes_and_servo_attribution();
     test_window_reset_and_deltas();
     test_counter_wrap();
     printf("bus_diag: all tests passed\n");
