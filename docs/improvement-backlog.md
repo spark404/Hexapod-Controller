@@ -43,7 +43,7 @@ motion-profile work (T4.x) is specified in
 
 | Phase | Theme | Active items |
 |------:|-------|-------------:|
-| 1 | Foundations and safety | 13 |
+| 1 | Foundations and safety | 14 (1 done) |
 | 2 | Servo bus and actuation | 6 |
 | 3 | Command interface | 1 |
 | 4 | Frames, sensing and contact | 5 |
@@ -69,9 +69,11 @@ Key chains:  T1.6 ─► T7.2 (25 Hz), T7.5 (command)
 
 ## Status
 
-Checked against the code on 2026-10-10 (git history shows no commit implementing
+Checked against the code on 2026-10-10 (git history showed no commit implementing
 any item other than the `dt_s` re-bound). "Open" means the code still shows the
-problem the item describes.
+problem the item describes. Updated 2026-10-11: T2.13 and T7.3 are partly done
+and T7.12 is done, all verified on the robot (commits `2b0e064`, `d6c1be3`,
+`34e582f`).
 
 | Item | Phase | Status | Note |
 |------|:-----:|--------|------|
@@ -80,19 +82,20 @@ problem the item describes.
 | T1.5 | 1 | Open | No `target_seq` / `actual_seq`. |
 | T1.6 | 1 | Open | `printf` busy-waits on USART1 at 115200; ~57 % CPU in WALKING. |
 | T2.12 | 1 | Open | No run-time stats, stack or heap reporting; mutex leak in gyro/accel tasks. |
-| T2.13 | 1 | Open | Firmware uses HSI; ControlHat has a 16 MHz HSE crystal (8 pF load, board has 15 pF caps). |
+| T2.13 | 1 | Partial | Runs from the 16 MHz HSE with an HSI fallback (`2b0e064`); boots at 84 MHz. Open: power-cycle test, MCO measurement, load-cap decision (board has 15 pF caps, crystal wants 8 pF). |
 | T2.3 | 1 | Open | `wrap_to_pi` still `fmodf`-based (`[-π, π)`). |
 | T2.4 | 1 | Open | `last_ticks = 0` and `last_velocity` unchanged. Moot after T4.1. |
 | T2.5 | 1 | Open | `FEMUR_OFFSET_ANGLE_RAD` still in `servos.c`. |
 | T2.6 | 1 | Open | `initialized`, `delta_yaw`, `pending_yaw`, `CTRL_LOOP_DT_S`, `CTRL_SERVO_Z_OFFSET` still present. |
 | T2.9 | 1 | Open | Not re-verified; no related commits. |
 | T4.3 | 1 | Open | Follows T1.2. |
-| T7.1 | 1 | Open | New. |
+| T7.1 | 1 | Partial | New. Overruns are now counted (T7.12) and reported; re-anchoring `tick_count` is not done. |
+| T7.12 | 1 | Done | New. Servo bus diagnostics every 30 s (`34e582f`). |
 | T3.5 | 2 | Open | No related code. |
 | T4.1 | 2 | Open | No `PROFILE_VELOCITY` / `PROFILE_ACCELERATION` use in `Core/Src`. |
 | T4.2 | 2 | Open | Depends on T4.1. |
 | T7.2 | 2 | Open | New. |
-| T7.3 | 2 | Open | New. Bus is at 1 Mbps today. |
+| T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
 | T7.4 | 2 | Open | New. Only Present Position is read today. |
 | T7.5 | 3 | Open | New. Today: 7-byte single-parameter frames, no CRC, no reply. |
 | T5.1 | 4 | Open | Reach radius is a fixed 40 mm. |
@@ -198,6 +201,8 @@ the expected period). Remove the unused `CTRL_LOOP_DT_S` macro from
 
 **Source:** [`design.md`](design.md) Appendix B.4.
 **Effort:** XS.
+**Status:** the overrun counter exists and is reported every 30 s (T7.12,
+`BUS_EV_LOOP_OVERRUN`). Re-anchoring is still open.
 
 **Do.** In `StartServoTask`, detect a missed deadline (`now` later than the
 next `tick_count`) and re-anchor `tick_count = now` instead of letting
@@ -207,6 +212,37 @@ second at `WARN`.
 **Verify.**
 - *Bench:* inject a single `osDelay(30)` in the servo loop; confirm there is no
   burst of back-to-back iterations afterwards and the overrun counter reads 1.
+
+
+### T7.12 — Servo bus diagnostics
+
+**Phase 1.** **Done** in commit `34e582f`, verified on the robot.
+
+**Source:** [`design.md`](design.md) Appendix A.8.
+**Effort:** S.
+
+**What it does.** `Core/Src/bus_diag.c` (no HAL or RTOS dependency, host test in
+`tests/bus_diag_test.c`) counts Sync Read and Sync Write transactions by
+outcome (ok, CRC failure, not a status packet, link-layer error, timeout, API
+error), transport failures in `usart_read`/`usart_write`, UART overrun, framing,
+noise, parity and DMA errors, bytes dropped when the RX ring is full, DMA
+receiver resets by cause, and servo loop overruns. Successful transactions are
+timed in µs with the DWT cycle counter (`htim1` is reset by the sensor delay
+routines, so it cannot be used). The default task prints one summary line every
+30 s, or three `WARN` lines when anything failed, plus totals since boot after
+the first failure.
+
+**Follow-ups.**
+- T7.4 adds the load read: give it its own `bus_op_t` so it is timed and
+  counted too.
+- Per-servo attribution needs a change in the `dynamixel` library (the Sync
+  Read returns one result for all 18 servos). Not done.
+- The per-failure `LOG_WARN` / `LOG_ERROR` lines in the servo task are still
+  there and can flood the serial port on a bad bus; they could drop to `DEBUG`
+  now that the summary exists.
+
+**Result.** At 2 Mbps: Sync Read 3,178 µs and Sync Write 796 µs on average with
+no failures in 4,500 transactions each.
 
 
 ### T1.2 — Servo fault back-channel + `CTRL_FAULT` state
@@ -287,15 +323,20 @@ ticks (e.g. 5 control ticks = 500 ms). If not, raise a fault.
 
 **Source:** [`design.md`](design.md) Appendix A.7.
 **Effort:** S.
+**Status:** **partly done** in `2b0e064`: PLL source HSE, `PLLM = 8`, `PLLN =
+168`, `PLLP = 4`, `PLLQ = 7` (2 MHz VCO input instead of 1 MHz), `HSE_VALUE =
+16000000`, and an HSI fallback in `Error_Handler()` (`clock_hse_fallback()`)
+that keeps the boot going if the crystal does not start. The first boot logged
+`Clock: HSE, SYSCLK 84000000 Hz`. Open: the bench checks under *Verify* and the
+decision on `C108` / `C109`.
 **Notes:** Autogenerated clock code is involved (`CLAUDE.md`): the CubeMX
-changes are for you to make. The crystal is 16 MHz (CL = 8 pF), so the PLL
-settings stay as they are.
+changes are for you to make. The crystal is 16 MHz (CL = 8 pF).
 
 **Do.**
-1. In CubeMX: HSE crystal/ceramic resonator mode, PLL source HSE, keep
-   `PLLM = 16`, `PLLN = 336`, `PLLP = 4`, `PLLQ = 7`; set `HSE_VALUE = 16000000`.
+1. In CubeMX: HSE crystal/ceramic resonator mode, PLL source HSE,
+   `PLLM = 8`, `PLLN = 168`, `PLLP = 4`, `PLLQ = 7`; set `HSE_VALUE = 16000000`.
    Do not copy the 25 MHz from ControlHat's `Hexapod.ioc`.
-2. Keep a way to build for the Nucleo (8 MHz bypass) or fall back to HSI.
+2. Keep a way to fall back to the HSI (done) or build for the Nucleo (8 MHz bypass, not done).
 3. If startup is marginal, swap `C108` / `C109` (15 pF) for ~8.2 pF C0G and
    re-test; fix the values in the schematic for the next revision.
 
@@ -304,8 +345,9 @@ settings stay as they are.
   counter or scope; confirm 84 MHz within crystal tolerance.
 - *Bench:* 20+ power cycles, including cold start, with reliable HSE startup
   (no fall-back to HSI).
-- *Bench:* confirm the Dynamixel bus still works at 1 Mbps, then at the chosen
-  higher rate.
+- *Bench:* confirm the Dynamixel bus works at the chosen rate (done, 2 Mbps).
+- *Bench:* force a start-up failure (for example hold the crystal pins) and
+  confirm the HSI fallback boots and logs the warning.
 
 
 ### T2.3 — `wrap_to_pi` boundary
@@ -442,6 +484,12 @@ the joint-limit check.
 **Source:** [`design.md`](design.md) Appendix A.
 **Effort:** S.
 **Depends on:** T2.13 recommended (accurate clock).
+**Status:** **partly done** in `d6c1be3`: all 18 servos were set to 2 Mbps by
+hand and `USART6` runs at 2000000 (the PC6 output speed went from medium to
+high). Measured at 2 Mbps: Sync Read 3.18 ms, Sync Write 0.80 ms, no errors in
+4,500 transactions each (design Appendix A.8). Open: step 1 below (a
+replacement servo still has to be set up by hand, and a servo left at 1 Mbps
+makes `PERIF_Dynamixel_Init` halt) and step 3.
 
 **Do.**
 1. Write a migration routine: try 2 Mbps, fall back to the current 1 Mbps, and
@@ -453,9 +501,14 @@ the joint-limit check.
    latency at the new rate.
 
 **Verify.**
-- *Bench:* logic analyzer on the bus; measured Sync Read time against the model
-  in `tools/bus_budget.py` (~2.2 ms for the position-only read).
-- *Bench:* a few hundred cycles with zero CRC or timeout errors.
+- *Bench:* logic analyzer on the bus; check the edge quality and the TX→RX
+  switch margin against the 20 µs Return Delay Time. (The Sync Read time is
+  measured: 3.18 ms against 2.16 ms in the first model. `tools/bus_budget.py`
+  is now calibrated to it.)
+- *Bench:* a few hundred cycles with zero CRC or timeout errors (done, the
+  diagnostics report zero in 4,500 cycles).
+- *Bench:* with a servo deliberately left at 1 Mbps, the routine finds it and
+  moves it to 2 Mbps.
 
 
 ### T7.4 — Read load, velocity and position

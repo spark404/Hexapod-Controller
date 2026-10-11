@@ -380,9 +380,11 @@ largest single lever is the *approach speed*: a slow final descent (≤ 15 mm/s
 over the last ~10 mm) gives ≤ 1.3 mm of overshoot even at 50 Hz / 25 Hz.
 
 **Recommendation:** control at 25 Hz, servo loop at 50 Hz, slow final approach,
-and move the bus to 2 Mbps (Appendix A). Go to a 100 Hz servo loop (3 Mbps) or a
-servo-side stop only if measured overshoot is a problem. The numbers are model
-estimates; measure real latency before committing to either step. Control at
+and keep the bus at 2 Mbps (Appendix A; done). Go to a 100 Hz servo loop (3 Mbps)
+or a servo-side stop only if measured overshoot is a problem. The numbers are
+model estimates; measure real latency before committing to either step. The Bus
+column predates the move to 2 Mbps: the measured read now takes 3.2 ms (A.8),
+which shortens the detect time by a few ms compared with the 1 Mbps rows. Control at
 25 Hz is only feasible after debug logging is made non-blocking (Appendix B,
 backlog T1.6).
 
@@ -484,9 +486,9 @@ The backlog is organized into six phases around this design (see
 | Contact | None (grounded flag is a gait bookkeeping bit) | Load-based, with kinematic fallback | T7.4 (read load) then T7.6 (detection) |
 | Idle and power-down | `POWERDOWN` drops torque from standing | STOPPING → SITDOWN → RESTING | T7.10 (replaces T1.4, T2.7, T5.5) |
 | Faults | `Error_Handler()` busy loop | FAULT state with back-channel | T1.2, T4.3 (phase 1) |
-| Servo bus | 1 Mbps, position read, software interpolation | 2 Mbps, load + velocity + position, hardware profiles | T7.3, T7.4, T4.1, T4.2 (phase 2) |
+| Servo bus | 2 Mbps (T7.3 partly done), position read, software interpolation | 2 Mbps, load + velocity + position, hardware profiles | T7.3, T7.4, T4.1, T4.2 (phase 2) |
 | Control rate | 10 Hz | 25 Hz | T7.2 (needs T1.6, T2.12) |
-| Clock | HSI | HSE crystal on ControlHat | T2.13 |
+| Clock | HSE crystal with HSI fallback (done, bench checks open) | HSE crystal on ControlHat | T2.13 |
 | Simulation | Controller project links `controller.c` | Needs contact and twist support | T7.7 |
 
 Phase 1 (logging, measurement, fault path, liveness, clock, hygiene) is
@@ -529,9 +531,11 @@ byte). Script: [`../tools/bus_budget.py`](../tools/bus_budget.py).
 
 ### A.1 Current configuration
 
-USART6 at **1 Mbaud** (`main.c`, 84 MHz APB2, OVER16), Return Delay Time 20 µs,
-Sync Read of Present Position (4 B) and Sync Write of Goal Position (4 B), both
-at the 50 Hz servo rate. Packet sizes at N = 18:
+USART6 at **2 Mbaud** since commit `d6c1be3` (`main.c`, 84 MHz APB2, OVER16;
+it was 1 Mbaud). The servos were reprogrammed by hand, so there is no
+migration routine yet (T7.3). Return Delay Time 20 µs, Sync Read of Present
+Position (4 B) and Sync Write of Goal Position (4 B), both at the 50 Hz servo
+rate. Packet sizes at N = 18:
 
 | Packet | Bytes |
 |--------|------:|
@@ -551,30 +555,35 @@ at the 50 Hz servo rate. Packet sizes at N = 18:
 
 ### A.3 Bus utilization
 
-Estimated bus-busy fraction (read + write time × rates). Assumptions: 20 µs
-Return Delay Time plus a 10 µs gap per servo status, 60 µs STM32 direction
-switch per transaction. These are guesses; measure.
+Estimated bus-busy fraction (read + write time × rates). The model is
+calibrated against the measurement at 2 Mbps (A.8): 20 µs Return Delay Time
+plus a fitted 61 µs gap per servo status, and a fitted 276 µs host cost per
+transaction (queue hand-off, DMA start, TX-complete interrupt, receiver arm).
+The first version of this table used 10 µs and 60 µs, which turned out to be
+too optimistic. The constants are time-based, so they are assumed to hold at
+other baud rates; only 2 Mbps has been measured.
 
 | Scenario | 1 Mbps | 2 Mbps | 3 Mbps | 4 Mbps |
 |----------|-------:|-------:|-------:|-------:|
-| A. Today: pos 50 Hz, goal 50 Hz | 24 % | 14 % | 10 % | 9 % |
-| B. Design: load+vel+pos 50 Hz, vel+goal 25 Hz | 28 % | 16 % | 12 % | 10 % |
-| C. As B, servo loop 100 Hz | 52 % | 29 % | 22 % | 18 % |
+| A. Today: pos 50 Hz, goal 50 Hz | 30 % | **19.9 %** (measured) | 17 % | 15 % |
+| B. Design: load+vel+pos 50 Hz, vel+goal 25 Hz | 34 % | 22 % | 17 % | 15 % |
+| C. As B, servo loop 100 Hz | 63 % | 40 % | 33 % | 29 % |
 
-One servo cycle (read + write) takes 6.6 ms at 1 Mbps and 3.6 ms at 2 Mbps for
+One servo cycle (read + write) takes 7.8 ms at 1 Mbps and 4.9 ms at 2 Mbps for
 scenario B. Aim for ≤ 30 % utilization to leave margin for scheduler jitter and
 retries.
 
 ### A.4 Conclusions
 
-1. **The design as proposed (B) fits at today's 1 Mbps (28 %)**, but with little
-   margin, and a 100 Hz servo loop (C) does not (52 %).
-2. **2 Mbps is the recommended minimum**: B drops to 16 %, C to 29 %, and one
-   servo cycle shrinks from 6.6 ms to 3.6 ms, which directly cuts detection
-   latency. 3 Mbps is the right choice if a 100 Hz servo loop is wanted.
+1. **The design as proposed (B) does not fit comfortably at 1 Mbps (34 %)**, and
+   a 100 Hz servo loop (C) does not fit at all (63 %).
+2. **2 Mbps is the recommended minimum, and it is in use**: B is 22 %, and one
+   servo cycle shrinks from 7.8 ms to 4.9 ms, which directly cuts detection
+   latency. A 100 Hz servo loop (C) is 40 % at 2 Mbps and 33 % at 3 Mbps, so it
+   needs 3 Mbps or fewer servos per read (see 3).
 3. **4 Mbps buys little**: past 2–3 Mbps the fixed per-servo turnaround time
-   (Return Delay Time + gaps, ~0.5 ms across 18 servos) dominates and the byte
-   time is already small. Fast Sync Read, which would remove most of that
+   (Return Delay Time + gaps, ~1.4 ms across 18 servos as measured) dominates
+   and the byte time is already small. Fast Sync Read, which would remove most of that
    turnaround, is **not supported on the XL430-W250-2** servos used here, so 3
    Mbps is effectively the ceiling for a full 18-servo read. If a faster loop is
    ever needed, the remaining levers are reading fewer servos per tick (e.g.
@@ -582,17 +591,22 @@ retries.
    Delay Time further, which is bounded by the STM32 direction-switch latency.
 4. **The STM32 can generate 1, 2, 3 and 4 Mbps exactly** from 84 MHz with
    OVER16 (0.00 % divider error). 4.5 Mbps comes out at 4.42 Mbps (−1.75 %),
-   which is too far off; avoid it. The firmware currently runs from the **HSI**
-   through the PLL (`main.c` `SystemClock_Config`), whose accuracy is only
-   about ±1 % at 25 °C and worse over temperature, so real baud error today is
-   the divider error plus the HSI error. The ControlHat board has an HSE crystal
-   that fixes this (A.7).
+   which is too far off; avoid it. The firmware now runs from the **HSE crystal**
+   through the PLL (A.7), so the baud error is the divider error plus the
+   crystal tolerance (tens of ppm). If the crystal ever fails to start, the
+   firmware falls back to the HSI, whose accuracy is only about ±1 %.
 5. **The Return Delay Time (20 µs) is set by the firmware's TX→RX switch
    latency, not by baud** (see the comment in `PERIF_Dynamixel_Configure`).
-   At 2 Mbps a byte is 5 µs, so the switch latency is several byte times; it
-   must be verified again after the change.
+   At 2 Mbps a byte is 5 µs, so the switch latency is several byte times. Reads
+   have run without a single error in 4,500 transactions (A.8), but the margin
+   is not measured; check it with a logic analyzer.
 
 ### A.5 What changing the baud rate involves
+
+**Status:** the move to 2 Mbps is done (all 18 servos and `USART6`, commit
+`d6c1be3`), but by hand. The migration routine below does not exist yet (T7.3),
+so a replacement servo has to be set to 2 Mbps before it is connected, and a
+servo still at 1 Mbps makes `PERIF_Dynamixel_Init` halt.
 
 - The baud rate is stored in each servo's EEPROM (Baud Rate register). All 18
   servos must be reprogrammed, one at a time, with torque off, from the old
@@ -603,11 +617,44 @@ retries.
 
 ### A.6 To validate before relying on this
 
-1. Measure the real Sync Read time at 1 Mbps (logic analyzer or DWT cycle
-   counter) and compare with the model's 3.67 ms for the position-only read.
+1. ~~Measure the real Sync Read time.~~ Done at 2 Mbps (A.8). Not measured at
+   1 Mbps, so the 1 Mbps column in A.3 is an extrapolation.
 2. Confirm the Present Load register address, units and update rate.
-3. Confirm which baud-rate register values the installed servo firmware
-   supports.
+3. ~~Confirm which baud-rate register values the installed servo firmware
+   supports.~~ 2 Mbps works on all 18 servos.
+4. Measure the TX→RX switch margin against the 20 µs Return Delay Time with a
+   logic analyzer, and check the signal edges through the 100 Ω series
+   resistor and 10 kΩ pull-up on the ControlHat.
+
+### A.8 Measured at 2 Mbps
+
+From the 30 s bus diagnostics (`Core/Src/bus_diag.c`, commit `34e582f`),
+timed with the DWT cycle counter, three consecutive windows with the robot
+running, 18 servos, 50 Hz servo loop:
+
+| Window | Sync Read ok / total | Read µs min / avg / max | Sync Write ok / total | Write µs min / avg / max |
+|-------:|---------------------:|------------------------:|----------------------:|-------------------------:|
+| 1 | 1500 / 1500 | 3126 / 3178 / 3306 | 1500 / 1500 | 793 / 796 / 877 |
+| 2 | 1500 / 1500 | 3128 / 3181 / 3299 | 1500 / 1500 | 793 / 795 / 877 |
+| 3 | 1500 / 1500 | 3130 / 3195 / 3311 | 1500 / 1500 | 793 / 796 / 877 |
+
+No CRC errors, timeouts, UART errors, dropped bytes, DMA resets or servo loop
+overruns in 4,500 reads and 4,500 writes.
+
+Compared with the first model (10 µs gap, 60 µs host cost): Sync Read 2,160 µs
+predicted, 3,180 µs measured; Sync Write 580 µs predicted, 796 µs measured.
+
+- The wire time is fixed: 1,510 µs for the read request and 18 status packets,
+  520 µs for the write. The rest is overhead: about 1,670 µs for the read and
+  276 µs for the write.
+- The write overhead (276 µs) is the host side cost of one transaction. The same
+  cost applies to the read, which leaves about 1,370 µs for 17 gaps between
+  status packets: **about 81 µs per servo** instead of the assumed 30 µs. That
+  is the servo turnaround plus the host receive path. Which of the two
+  dominates needs a logic analyzer.
+- The jitter is small (reads within about 180 µs, writes within 85 µs).
+- Only successful transactions are timed. Failed ones would show the 10 ms
+  timeout and distort the figures.
 
 ---
 
@@ -703,7 +750,22 @@ logging is still wanted.
 4. Record the servo loop's period jitter (max deviation of the wake time) with
    logging off and on.
 
-### A.7 Clock source: HSI today, HSE crystal available on ControlHat
+### A.7 Clock source: HSE crystal on ControlHat
+
+**Status (2026-10-11):** done in commit `2b0e064`. The firmware runs from the
+16 MHz HSE crystal with **PLLM = 8, PLLN = 168, PLLP = 4, PLLQ = 7** (2 MHz VCO
+input, which ST recommends over the 1 MHz that PLLM = 16 gives, 336 MHz VCO,
+84 MHz SYSCLK, 48 MHz PLL48CK) and `HSE_VALUE = 16000000`. If the crystal does
+not start, `Error_Handler()` calls `clock_hse_fallback()`, which rebuilds the
+same 84 MHz from the HSI (PLLM = 16, PLLN = 336) so the boot continues, and the
+start-up log says which source is in use (`Clock: HSE, SYSCLK 84000000 Hz`).
+The first boot on the robot logged HSE at 84 MHz.
+
+Not yet verified: reliable start-up over repeated cold power cycles, SYSCLK
+against a frequency counter (MCO), and whether the load capacitors need
+changing (findings 3 and 4). The fallback path itself has not been exercised.
+
+The findings below are from the inspection that preceded the change.
 
 Findings from a read-only inspection of `../ControlHat` (schematic and exported
 netlist; layout not reviewed), the crystal datasheet (Würth 830064296 / IQD
@@ -726,10 +788,9 @@ drive level 100 µW max.
 1. **ControlHat's `Hexapod.ioc` has the wrong frequency.** It says
    `HSE_VALUE = 25000000`; the crystal is 16 MHz. Do not use that file's HSE
    setting.
-2. **16 MHz is convenient.** It equals the HSI frequency, so the PLL settings
-   stay exactly as they are (`PLLM = 16`, `PLLN = 336`, `PLLP = 4`, `PLLQ = 7`,
-   84 MHz). Only the PLL source changes to HSE, plus `HSE_VALUE = 16000000` in
-   `stm32f4xx_hal_conf.h`.
+2. **16 MHz is convenient.** It equals the HSI frequency, so the same PLL
+   settings would work (`PLLM = 16`, `PLLN = 336`). The firmware uses `PLLM = 8`,
+   `PLLN = 168` instead for the better VCO input frequency (see Status).
 3. **The load capacitors look too large.** The 8 pF crystal needs
    `CL = C1·C2/(C1+C2) + Cstray = 8 pF`. With two 15 pF capacitors the
    effective load is `7.5 pF + Cstray`, i.e. 10.5–12.5 pF for a plausible
@@ -756,19 +817,20 @@ drive level 100 µW max.
    capacitance C1 is not in the datasheet, so I cannot compute it). The
    frequency error is negligible next to HSI's ±1 %; the startup margin is the
    real concern. Script: [`../tools/hse_check.py`](../tools/hse_check.py).
-5. **The firmware does not use the crystal.** `SystemClock_Config` selects HSI
-   as the PLL source. The firmware's own `Hexapod.ioc` has `HSE_VALUE = 8000000`
-   (the Nucleo, with 8 MHz from the ST-LINK in bypass mode), so the two boards
-   need different clock setups; keep HSI as a fallback or select per board.
+5. **The firmware did not use the crystal.** `SystemClock_Config` selected HSI
+   as the PLL source, and the firmware's own `Hexapod.ioc` had `HSE_VALUE =
+   8000000`. Both are changed now (see Status). A Nucleo build, which has 8 MHz
+   from the ST-LINK in bypass mode, would need a different setup or the HSI
+   fallback.
 6. **Operating range −10 to +70 °C** is fine for indoor use, but check enclosure
    temperature next to the regulators and servos.
 7. **Switching needs CubeMX, not a hand edit** (`CLAUDE.md`: do not modify
    autogenerated regions). Crystal/ceramic resonator mode (not bypass).
 
 **Suggested path:** the capacitors are 0402 parts on an existing board, so this
-can be tried without a respin. (1) Switch the firmware to HSE and check that it
-starts reliably over repeated power cycles and with MCO output measured on a
-counter. (2) If startup is slow or intermittent, replace `C108` and `C109` with
+can be tried without a respin. (1) ~~Switch the firmware to HSE~~ (done) and
+check that it starts reliably over repeated power cycles and with MCO output
+measured on a counter. (2) If startup is slow or intermittent, replace `C108` and `C109` with
 C0G 8.2 pF (6.8 pF if the board measures low on stray capacitance) and re-test.
 (3) Fix the values in the schematic for the next revision (through the Konnect
 tools, not by editing the file).
