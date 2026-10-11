@@ -47,6 +47,7 @@
 #include "calculator.h"
 #include "servos.h"
 #include "log.h"
+#include "bus_diag.h"
 #include "dynamixel/protocol.h"
 #include "controller.h"
 #include "controller_math.h"
@@ -109,6 +110,7 @@ MATRIX(M, 4)
 
 #define HZ_TO_INTERVAL(hz) (1000 / (uint32_t)(hz))
 #define MAIN_LOOP_INTERVAL HZ_TO_INTERVAL(1)
+#define BUS_DIAG_REPORT_S 30  // MAIN_LOOP_INTERVAL ticks per report, see StartDefaultTask
 #define CONTROL_LOOP_INTERVAL HZ_TO_INTERVAL(10)
 #define SERVO_LOOP_INTERVAL HZ_TO_INTERVAL(50)
 #define MAG_LOOP_INTERVAL HZ_TO_INTERVAL(5)
@@ -444,6 +446,13 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
     HAL_TIM_Base_Start(&htim1);
+
+    // Free running cycle counter, used to time servo bus transactions.
+    // htim1 can not be used for that, the sensor delay routines reset it.
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    bus_diag_init();
 
     LOG_INFO("[Main] Hexapod Control Firmware");
     LOG_INFO("[Main] Build: %s %s", __DATE__, __TIME__);
@@ -1248,6 +1257,7 @@ ssize_t usart_read(uint8_t *dst, const size_t len, const uint32_t timeout) {
 
     /* Ensure only one reader */
     if (osMutexAcquire(usartMutexHandle, timeout) != osOK) {
+        bus_diag_event(BUS_EV_RD_MUTEX_TMO, 1);
         return -1;
     }
 
@@ -1269,6 +1279,9 @@ ssize_t usart_read(uint8_t *dst, const size_t len, const uint32_t timeout) {
     }
 
     osMutexRelease(usartMutexHandle);
+    if (count < len) {
+        bus_diag_event(count == 0 ? BUS_EV_RD_EMPTY : BUS_EV_RD_PARTIAL, 1);
+    }
     return (ssize_t)count;
 }
 
@@ -1279,6 +1292,7 @@ ssize_t usart_write(const uint8_t *src, const size_t len, const uint32_t timeout
 
     /* Exclusive access */
     if (osMutexAcquire(usartMutexHandle, timeout) != osOK) {
+        bus_diag_event(BUS_EV_WR_MUTEX_TMO, 1);
         return -1;
     }
 
@@ -1292,12 +1306,14 @@ ssize_t usart_write(const uint8_t *src, const size_t len, const uint32_t timeout
     osSemaphoreAcquire(usart_tx_semHandle, 0);
 
     if (osMessageQueuePut(usart_tx_queueHandle, &msg, 0, timeout) != osOK) {
+        bus_diag_event(BUS_EV_WR_TXQ_FULL, 1);
         osMutexRelease(usartMutexHandle);
         return -1;
     }
 
     /* Wait for TX complete */
     if (osSemaphoreAcquire(usart_tx_semHandle, timeout) != osOK) {
+        bus_diag_event(BUS_EV_WR_TX_TMO, 1);
         osMutexRelease(usartMutexHandle);
         return -1;
     }
@@ -1353,6 +1369,13 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
     if (huart != &huart6) {
         return;
     }
+
+    const uint32_t err = huart->ErrorCode;
+    if (err & HAL_UART_ERROR_ORE) bus_diag_event(BUS_EV_UART_ORE, 1);
+    if (err & HAL_UART_ERROR_FE) bus_diag_event(BUS_EV_UART_FE, 1);
+    if (err & HAL_UART_ERROR_NE) bus_diag_event(BUS_EV_UART_NE, 1);
+    if (err & HAL_UART_ERROR_PE) bus_diag_event(BUS_EV_UART_PE, 1);
+    if (err & HAL_UART_ERROR_DMA) bus_diag_event(BUS_EV_UART_DMA, 1);
 
     // osThreadFlagsSet internally handles context switching from ISR
     osThreadFlagsSet(usartRxTaskHandle, RX_DMA_ERROR);
@@ -1460,6 +1483,7 @@ static size_t dma_rx_write_idx(void)
 static void uart_rx_drain_dma(void)
 {
     bool pushed = false;
+    uint32_t dropped = 0;
     size_t write = dma_rx_write_idx();
 
     taskENTER_CRITICAL();
@@ -1467,11 +1491,16 @@ static void uart_rx_drain_dma(void)
         uint8_t b = dma_rx_buf[dma_rx_read_idx];
         dma_rx_read_idx = (dma_rx_read_idx + 1) % DMA_RX_BUF_SIZE;
 
-        ringbuf_push(&rx_ring, b);
+        if (!ringbuf_push(&rx_ring, b)) {
+            dropped++;
+        }
         pushed = true;
-        // TODO deal with overruns
     }
     taskEXIT_CRITICAL();
+
+    if (dropped > 0) {
+        bus_diag_event(BUS_EV_RX_DROP, dropped);
+    }
 
     if (pushed) {
         osSemaphoreRelease(usart_rx_semHandle);
@@ -1776,6 +1805,35 @@ void PERIF_Dynamixel_Configure(void) {
     }
 }
 
+/**
+ * Microseconds since a DWT cycle counter reading taken earlier. Good for
+ * intervals below the 32 bit wrap time (about 51 s at 84 MHz).
+ */
+static uint32_t diag_elapsed_us(const uint32_t start_cycles)
+{
+    return (DWT->CYCCNT - start_cycles) / (SystemCoreClock / 1000000U);
+}
+
+/** Sync Read of the present position of all servos, timed and counted. */
+static dynamixel_result_t servo_bus_read_positions(uint32_t *values)
+{
+    const uint32_t start = DWT->CYCCNT;
+    const dynamixel_result_t res = dynamixel_get_long_parameter_multiple(
+        dynamixel_servos, 18, XL430_CT_RAM_PRESENT_POSITION, values);
+    bus_diag_record(BUS_OP_READ_POS, res, diag_elapsed_us(start));
+    return res;
+}
+
+/** Sync Write of the goal position of all servos, timed and counted. */
+static dynamixel_result_t servo_bus_write_goals(const uint32_t *values)
+{
+    const uint32_t start = DWT->CYCCNT;
+    const dynamixel_result_t res = dynamixel_set_long_parameter_multiple(
+        dynamixel_servos, 18, XL430_CT_RAM_GOAL_POSITION, values);
+    bus_diag_record(BUS_OP_WRITE_GOAL, res, diag_elapsed_us(start));
+    return res;
+}
+
 /* USER CODE END 4 */
 
 /* USER CODE BEGIN Header_StartDefaultTask */
@@ -1801,10 +1859,36 @@ void StartDefaultTask(void *argument)
     int clock = 0;
     int stack_report_counter = 0;
 
+    // Servo bus diagnostics, reported every BUS_DIAG_REPORT_S seconds
+    static bus_diag_snapshot_t diag_prev;
+    static bus_diag_snapshot_t diag_cur;
+    static bus_diag_report_t diag_report;
+    int diag_report_counter = 0;
+    bus_diag_snapshot(&diag_prev, true);
+
     /* Infinite loop */
     for (;;) {
         clock++;
         stack_report_counter++;
+        diag_report_counter++;
+
+        if (diag_report_counter >= BUS_DIAG_REPORT_S) {
+            diag_report_counter = 0;
+            bus_diag_snapshot(&diag_cur, true);
+            bus_diag_format(&diag_prev, &diag_cur, BUS_DIAG_REPORT_S, &diag_report);
+            diag_prev = diag_cur;
+
+            if (diag_report.window_errors) {
+                LOG_WARN("%s", diag_report.summary);
+                LOG_WARN("%s", diag_report.protocol);
+                LOG_WARN("%s", diag_report.transport);
+            } else {
+                LOG_INFO("%s", diag_report.summary);
+            }
+            if (diag_report.boot[0] != '\0') {
+                LOG_INFO("%s", diag_report.boot);
+            }
+        }
 
         // FIXME clock is a horrible way to print data periodically, do better.
         if (clock % (5 * 5) == 0) {
@@ -2305,6 +2389,7 @@ void StartUsartRxTask(void *argument)
              * uart_rx_reset_dma() from the servo task. Any partially-received
              * bytes are unreliable, so flush them. */
             LOG_WARN("[USARTRX] UART error, resetting DMA receiver");
+            bus_diag_event(BUS_EV_RESET_UART_ERR, 1);
             uart_rx_reset_dma();
         }
     }
@@ -2511,8 +2596,7 @@ void StartServoTask(void *argument)
             // A) Read the actual positions from the servos
             //    - Convert pulses to rad
             //    - Compensate for geometry
-            const dynamixel_result_t res = dynamixel_get_long_parameter_multiple(
-                dynamixel_servos, 18, XL430_CT_RAM_PRESENT_POSITION, &values[0][0]);
+            const dynamixel_result_t res = servo_bus_read_positions(&values[0][0]);
             if (res != DNM_OK) {
                 LOG_ERROR("[ServoTask] Failed to read actual servo positions [%d]", res);
                 break;
@@ -2543,7 +2627,7 @@ void StartServoTask(void *argument)
             }
 
             // B) Write the goal position to the servos
-            if (dynamixel_set_long_parameter_multiple(dynamixel_servos, 18, XL430_CT_RAM_GOAL_POSITION, &values[0][0]) != DNM_OK) {
+            if (servo_bus_write_goals(&values[0][0]) != DNM_OK) {
                 LOG_ERROR("[ServoTask] Failed to write target servo positions");
             };
 
@@ -2558,8 +2642,7 @@ void StartServoTask(void *argument)
             // A) Read the actual positions from the servos
             //    - Convert pulses to rad
             //    - Compensate for geometry
-            dynamixel_result_t res = dynamixel_get_long_parameter_multiple(
-                dynamixel_servos, 18, XL430_CT_RAM_PRESENT_POSITION, &values[0][0]);
+            dynamixel_result_t res = servo_bus_read_positions(&values[0][0]);
             if (res == DNM_OK) {
                 for (int i=0; i<6; i++) {
                     angles[i][0] = xl430_pulse_to_rad_centered(values[i][0]);
@@ -2577,6 +2660,7 @@ void StartServoTask(void *argument)
                 osDelay(5);
 
                 // Perform DMA recovery (mutex-protected)
+                bus_diag_event(BUS_EV_RESET_READ_FAIL, 1);
                 uart_rx_reset_dma();
             };
 
@@ -2654,7 +2738,7 @@ void StartServoTask(void *argument)
                 values[i][2] = xl430_rad_centered_to_pulse(angles[i][2]);
             }
 
-            if (dynamixel_set_long_parameter_multiple(dynamixel_servos, 18, XL430_CT_RAM_GOAL_POSITION, &values[0][0]) != DNM_OK) {
+            if (servo_bus_write_goals(&values[0][0]) != DNM_OK) {
                 LOG_ERROR("[ServoTask] Failed to write target servo positions");
             };
 
@@ -2698,6 +2782,10 @@ void StartServoTask(void *argument)
     }
 
     tick_count += pdMS_TO_TICKS(SERVO_LOOP_INTERVAL);
+    if ((int32_t)(osKernelGetTickCount() - tick_count) > 0) {
+        // The iteration took longer than its period
+        bus_diag_event(BUS_EV_LOOP_OVERRUN, 1);
+    }
     osDelayUntil(tick_count);
   }
   /* USER CODE END StartServoTask */
