@@ -52,7 +52,7 @@ FetchContent_MakeAvailable(HexapodMath)
 FetchContent_Declare(
         dynamixel
         GIT_REPOSITORY https://github.com/spark404/dynamixel.git
-        GIT_TAG "5b681c9ae75853b416af124494d2edf28f231d0a"
+        GIT_TAG "0a49c5ca062a51fac05d5a7708a1f644990dfaa8"
         GIT_PROGRESS ON
         GIT_REMOTE_UPDATE_STRATEGY CHECKOUT
 )
