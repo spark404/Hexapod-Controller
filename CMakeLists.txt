@@ -89,6 +89,24 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         Drivers/BNO055/Src/bno055.c
 )
 
+# Servo profile bench experiment (docs/servo-profile-bench-experiment.md): a separate
+# firmware that runs the experiment on leg 0 instead of the normal servo task.
+# Use the BenchDry and Bench presets.
+option(HEXAPOD_BENCH_PROFILE "Build the servo profile bench experiment instead of the normal firmware" OFF)
+set(HEXAPOD_BENCH_EXPERIMENTS "65" CACHE STRING
+        "Bit mask of the bench experiments: 1=E1 2=E2 4=E3 8=E4 16=E5 32=E6 64=E0 (safety self test)")
+if(HEXAPOD_BENCH_PROFILE)
+    message(STATUS "Building the servo profile BENCH EXPERIMENT, experiments mask ${HEXAPOD_BENCH_EXPERIMENTS}")
+    target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+            Core/Src/bench_profile.c
+            Core/Src/bench_script.c
+    )
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
+            BENCH_PROFILE=1
+            BENCH_EXPERIMENT_MASK=${HEXAPOD_BENCH_EXPERIMENTS}U
+    )
+endif()
+
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
         # Add user defined include paths

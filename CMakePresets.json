@@ -23,6 +23,26 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release"
             }
+        },
+        {
+            "name": "BenchDry",
+            "description": "Servo profile bench experiment, dry run: identification, direction check and the safety self test (E1 + E0)",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "HEXAPOD_BENCH_PROFILE": "ON",
+                "HEXAPOD_BENCH_EXPERIMENTS": "65"
+            }
+        },
+        {
+            "name": "Bench",
+            "description": "Servo profile bench experiment, all runs E1 to E6",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "HEXAPOD_BENCH_PROFILE": "ON",
+                "HEXAPOD_BENCH_EXPERIMENTS": "63"
+            }
         }
     ],
     "buildPresets": [
@@ -33,6 +53,14 @@
         {
             "name": "Release",
             "configurePreset": "Release"
+        },
+        {
+            "name": "BenchDry",
+            "configurePreset": "BenchDry"
+        },
+        {
+            "name": "Bench",
+            "configurePreset": "Bench"
         }
     ]
 }

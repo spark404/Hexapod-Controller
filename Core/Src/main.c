@@ -48,6 +48,9 @@
 #include "servos.h"
 #include "log.h"
 #include "bus_diag.h"
+#ifdef BENCH_PROFILE
+#include "bench_profile.h"
+#endif
 #include "dynamixel/protocol.h"
 #include "controller.h"
 #include "controller_math.h"
@@ -2679,6 +2682,11 @@ void StartServoTask(void *argument)
         case SERVO_INIT:
             PERIF_Dynamixel_Init();
             PERIF_Dynamixel_Configure();
+#ifdef BENCH_PROFILE
+            // Bench build: run the servo profile experiment on leg 0 instead of the
+            // normal servo task. Does not return.
+            bench_profile_run(dynamixel_servos);
+#endif
             state = SERVO_POWER_UP;
             break;
         case SERVO_SYNC_FROM_HW: {
