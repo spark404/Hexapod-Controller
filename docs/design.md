@@ -403,6 +403,13 @@ raising control to 25 Hz is free as far as the bus is concerned, and the
 largest single lever is the *approach speed*: a slow final descent (≤ 15 mm/s
 over the last ~10 mm) gives ≤ 1.3 mm of overshoot even at 50 Hz / 25 Hz.
 
+**Measured (bench experiment, 2026-10-12):** the servo follows a goal about 43 ms late (the tibia's position
+is a constant 43 to 44 ms behind its profile; chained runs 35 to 60 ms). A servo-side stop (goal = present
+position with a hard profile) given at 2.65 rad/s takes about 80 ms to bring the velocity to zero and runs on
+55 mrad (time-based stop) to 149 mrad (velocity-based stop). The run-on grows with the square of the speed, so
+at the slow final approach recommended below it would be a few mrad (extrapolated, not measured). The reaction
+time therefore has the servo lag in it on top of the detection latency above.
+
 **Recommendation:** control at 25 Hz, servo loop at 50 Hz, slow final approach,
 and keep the bus at 2 Mbps (Appendix A; done). Go to a 100 Hz servo loop (3 Mbps)
 or a servo-side stop only if measured overshoot is a problem. The numbers are

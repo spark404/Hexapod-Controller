@@ -1,5 +1,21 @@
 # Servo Velocity Control — Phase 2 Implementation Note
 
+> **Bench result (2026-10-12), read before implementing.** The experiment this note waited for has been run
+> ([`servo-profile-bench-experiment.md`](servo-profile-bench-experiment.md) §6.3, backlog T7.14). Findings
+> that change this note:
+> - Use the **velocity-based** profile with `v = Δ/(T−Tr)` and `a = v/Tr` computed per goal (the formula of
+>   the review, not `v = Δ/T`), written together with the goal in one 12-byte Sync Write at address 108
+>   (acceleration, velocity, goal), at the control rate. The **time-based** mode of §9 is not recommended: no
+>   tracking gain, about 12 ms more lag, an EEPROM drive mode to change.
+> - **Joint synchronisation (§1) is not achieved**: the joints arrive 52–85 ms apart in every mode.
+> - The gain over plain goals is modest at 25 Hz (−5 to −33 % tracking error); the servos follow their profile
+>   about 43 ms late (tibia), which T7.15 (gains, feedforward) addresses.
+> - The Velocity Limit register does not cap the profile velocity: clamp it (about 5.9 rad/s on the tibia).
+> - Register names, the contiguous 108–119 write and the unit constants (corrected) are as in this note's review;
+>   the unit constants were confirmed on the robot.
+> The rest of the note is the original text and still needs the corrections of the review (macro names, DRIVE
+> MODE in EEPROM, ranges, bandwidth section).
+
 Implementation note for moving the per-joint motion profile from software
 (in the servo task) onto the XL430 servos, with per-tick **synchronized**
 joint timing so the foot's Cartesian trajectory is preserved between

@@ -8,6 +8,7 @@
 | [`controller-audit.md`](controller-audit.md) | Findings: bugs, safety gaps, walking-model gaps, interaction problems, each mapped to a backlog item | You want the reasoning behind a backlog item |
 | [`improvement-backlog.md`](improvement-backlog.md) | Six phases of prioritized work items (IDs T1.1–T7.11) with status, dependencies, how to do each, and how to verify | You are deciding what to work on next |
 | [`servo-velocity-control-phase2.md`](servo-velocity-control-phase2.md) | Implementation spec for XL430 hardware motion profiles (backlog T4.1 / T4.2) | You are implementing T4.1 / T4.2 (Phase 2) |
+| [`servo-profile-bench-experiment.md`](servo-profile-bench-experiment.md) | The bench experiment on servo profiles (backlog T7.14): plan, how it was run, and the results in section 6. The code is on the branch `bench-test` | You want the measured behaviour of the servos, or to decide how T4.1 / T4.2 / T7.15 are done |
 
 Flow: design intent (`control-model`) → as built (`controller-overview`) →
 what is wrong (`controller-audit`) → what to do about it (`improvement-backlog`,
