@@ -44,7 +44,7 @@ motion-profile work (T4.x) is specified in
 | Phase | Theme | Active items |
 |------:|-------|-------------:|
 | 1 | Foundations and safety | 14 (1 done) |
-| 2 | Servo bus and actuation | 7 |
+| 2 | Servo bus and actuation | 9 |
 | 3 | Command interface | 1 |
 | 4 | Frames, sensing and contact | 5 |
 | 5 | Motion core | 4 |
@@ -97,6 +97,8 @@ and T7.12 is done, all verified on the robot (commits `2b0e064`, `d6c1be3`,
 | T7.2 | 2 | Open | New. |
 | T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
 | T7.4 | 2 | Partial | New. Load, velocity and position come back in one 10-byte Sync Read and are published. First runs on the robot: values and timing as expected; the byte stuffing bug is fixed (library `0a49c5c`) and confirmed (0 failures in 2,950 reads). Open: units and longer runs. |
+| T7.15 | 2 | Open | New, from the first bench data. A loaded leg lags its servo profile by ~100 ms and stops short of the goal: tune the position controller. |
+| T7.14 | 2 | Done | New. Bench experiment for the servo profile mode: all 103 runs on the robot, 2026-10-12. Result in [plan §6.3](servo-profile-bench-experiment.md): velocity-based computed profile if profiles are used, no sync benefit, servo lag is the issue (T7.15). |
 | T7.13 | 2 | Open | New, low priority. Byte stuffing in the library costs ~0.12 ms per bus transaction in the Debug build; do it in one pass. |
 | T7.5 | 3 | Open | New. Today: 7-byte single-parameter frames, no CRC, no reply. |
 | T5.1 | 4 | Open | Reach radius is a fixed 40 mm. |
@@ -456,6 +458,7 @@ Move motion profiles into the servos, raise the bus speed, and read load so cont
 
 **Source:** [`servo-velocity-control-phase2.md`](servo-velocity-control-phase2.md) §1.
 **Effort:** M.
+**Depends on:** the bench experiment (T7.14) for the profile mode.
 **Why:** Today the servo task does software trapezoidal
 interpolation with deadband, vel-clamp, accel-clamp, min-step.
 The XL430 can do this in hardware via `PROFILE_VELOCITY` /
@@ -573,6 +576,76 @@ critical-section helpers. No behavior change yet.
 - *Bench:* servo loop period unchanged with the larger read.
 
 
+### T7.15 — Servo position controller tuning
+
+**Source:** first dry run of T7.14, 2026-10-12
+([plan §6.1](servo-profile-bench-experiment.md)).
+**Effort:** M, mostly bench time.
+
+**Why.** The servos follow their profile late: the tibia, which follows it best, reaches
+97 % of the profile's peak velocity but its position is a constant 43 to 44 ms behind the
+profile (eight moves, full bench run); the loaded femur starts about 100 ms late and reaches
+only 0.50 of 0.86 rad/s. A loaded joint also
+stops short of the goal: the femur 21 pulses (32 mrad) at a load of 12 %, the tibia 10
+pulses the other way at −5.7 %, about −1.7 pulses per % of load for both (the coxa,
+without gravity load, is within 2 pulses). The position controller has no integral
+action (gain 0), and the feedforward gains are 0 too. Any servo profile, time based or velocity based, is limited by this
+lag on the loaded joints, and the walking controller works with positions that are off
+by this much. The servos are also of two models (2XL430-W250 for coxa and femur, XL430
+for the tibia), which may need different settings.
+
+**Do.** The gains now (read by the bench identification): position P 640, I 0, D 2000
+(servos 16 and 17) or 3600 (servo 18); velocity P 100, I 1800 or 1000; feedforward 1st and
+2nd 0. On one leg, step the feedforward 1st gain first (it is the one meant to remove the
+lag of a velocity profile), then the position P and D gains, and measure the lag and the
+shortfall with the bench harness (T7.14), at the standing load. Settle on gains per joint, write them in
+`PERIF_Dynamixel_Configure`. A little integral action removes the shortfall but adds
+overshoot and windup when the leg is blocked, so decide with the data.
+
+**Verify.**
+- *Bench:* with the new gains the loaded femur is within a few pulses of its goal at rest
+  and follows a 100 ms profile within a small lag.
+- *Walk:* no oscillation when standing and walking; the temperature of the servos stays
+  normal.
+
+**Interaction.** The position minus profile difference is proportional to the load, so it
+is a second indicator for contact detection (T7.6); changing the gains changes it.
+
+
+### T7.14 — Servo profile bench experiment
+
+**Plan:** [`servo-profile-bench-experiment.md`](servo-profile-bench-experiment.md).
+**Effort:** M for the harness and analysis script (done), plus about an hour on the
+bench.
+**Status:** **done (2026-10-12), results in plan §6.3. The code is on the branch `bench-test`, not on `main`.** *(Earlier status:)* dry run passed, the full run was next. On 2026-10-12 the first dry run
+aborted in the third run because the start pose move demanded an accuracy a loaded
+joint cannot give, and the experiment left its profile in the servos; both are fixed
+(plan §6.1). The second dry run passed all checks (plan §6.2): directions, unit
+constants, self test. The drive mode switch to time-based mode is not covered by the dry
+run and happens for the first time in the full run. Built and host-tested on 2026-10-12: the bench
+firmware (`Core/Src/bench_profile.c`, `bench_script.c`, presets `BenchDry` for the
+dry run and `Bench` for the 103 runs of the full experiment), the analysis script
+(`tools/bench_profile_analyze.py`) and their tests (`sh tests/run_host_tests.sh`).
+The LEDs of leg 0 are on while it runs, the start pose is checked for room, and
+matplotlib is in `tools/.venv` for the plots. The steps to prepare the robot, flash and
+capture are in section 5 of the plan. Open: the dry run on the robot, then the full run,
+then section 6 of the plan.
+**Depends on:** nothing; T7.4 (done) gives the read it builds on.
+**Needed by:** T4.1 and T4.2, which should not start before the result.
+
+**Do.** Build the `Bench` firmware (leg 0 only, 1 kHz sampling of the servo's own
+tick and trajectory registers), run the scripted sequence E1–E7 on the robot, and
+analyse the log with `tools/bench_profile_analyze.py`.
+
+**Decides.** Time-based or velocity-based servo profiles, or keeping the software
+interpolation, from three open questions: does the motion chain smoothly across
+goals, do joints with different travel arrive together in time-based mode, and
+what happens when the requested time is too short.
+
+**Verify.** Section 7 of the plan filled in, T4.1/T4.2 and
+`servo-velocity-control-phase2.md` updated to match.
+
+
 ### T7.13 — Single-pass byte stuffing in the dynamixel library
 
 **Priority:** low, for later. **Effort:** S.
@@ -612,10 +685,22 @@ servo).
 
 ### T4.2 — Phase 2: Per-joint synchronized profile
 
-**Phase 2.** Write `PROFILE_VELOCITY` and `GOAL_POSITION` as one contiguous 8-byte Sync Write, only when a new control target is published (design Appendix A.2).
+**Phase 2.** Write `PROFILE_ACCELERATION`, `PROFILE_VELOCITY` and `GOAL_POSITION` as one contiguous 12-byte Sync Write at address 108, only when a new control target is published (design Appendix A.2).
 
 **Source:** [`servo-velocity-control-phase2.md`](servo-velocity-control-phase2.md) §1–§10.
 **Effort:** M (after T4.1).
+**Depends on:** the bench experiment (T7.14, done).
+**Bench result (plan §6.3), to be weighed before starting.**
+- **Variant:** velocity-based with `v = Δ/(T−Tr)`, `a = v/Tr` per goal, written with the goal. Time-based mode is
+  not recommended: no tracking gain, 12 ms more lag, and an EEPROM drive mode.
+- **Gain:** −5 to −33 % tracking error against plain goals at 25 Hz or faster, and a flatter speed at 10 Hz.
+  At 25 Hz the modes are indistinguishable in the plots: the servo's own lag of 40–60 ms dominates, so T7.15
+  (feedforward, gains) is probably worth more and comes first.
+- **Not delivered:** joint synchronisation. The joints arrive 52–85 ms apart in every mode, because the servos
+  follow their profiles differently (coxa slowest). The "finish together" motive below does not hold.
+- **Cost:** 1.5 ms per write against 0.8 ms for the goal alone, at the control rate.
+- **Also:** clamp the profile velocity in the firmware, the Velocity Limit register does not (joints reach about
+  5.9 rad/s at most).
 **Why:** Phase 1 leaves joints free to finish at different times,
 so the foot's Cartesian path between control ticks is whatever
 joint-space interpolation chooses. Phase 2 scales
