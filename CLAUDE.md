@@ -12,6 +12,8 @@
 - Primary build system: CMake + STM32Cube-generated sources.
 - Typical local build dir: `cmake-build-debug`.
 - Do not run hardware-dependent tests or flash unless asked.
+- Presets `Debug` and `Release` build the normal firmware. `BenchDry` and `Bench` build the separate servo profile bench experiment firmware (`docs/servo-profile-bench-experiment.md`); never flash those unless asked.
+- Host tests (no hardware, no ARM toolchain): `sh tests/run_host_tests.sh`.
 
 ## Coding conventions
 - Use C99 and keep code compatible with embedded targets.
