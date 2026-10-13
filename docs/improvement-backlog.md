@@ -44,7 +44,7 @@ motion-profile work (T4.x) is specified in
 | Phase | Theme | Active items |
 |------:|-------|-------------:|
 | 1 | Foundations and safety | 14 (1 done) |
-| 2 | Servo bus and actuation | 9 |
+| 2 | Servo bus and actuation | 9 (2 done) |
 | 3 | Command interface | 1 |
 | 4 | Frames, sensing and contact | 5 |
 | 5 | Motion core | 4 |
@@ -73,7 +73,9 @@ Checked against the code on 2026-10-10 (git history showed no commit implementin
 any item other than the `dt_s` re-bound). "Open" means the code still shows the
 problem the item describes. Updated 2026-10-11: T2.13 and T7.3 are partly done
 and T7.12 is done, all verified on the robot (commits `2b0e064`, `d6c1be3`,
-`34e582f`).
+`34e582f`). Updated 2026-10-13 (re-checked against the code, nothing else was
+implemented): T7.4 is done (units and the byte stuffing fix confirmed on the robot,
+the bench experiment used the same registers), T7.14 is done and T7.15 was added.
 
 | Item | Phase | Status | Note |
 |------|:-----:|--------|------|
@@ -96,7 +98,7 @@ and T7.12 is done, all verified on the robot (commits `2b0e064`, `d6c1be3`,
 | T4.2 | 2 | Open | Depends on T4.1. |
 | T7.2 | 2 | Open | New. |
 | T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
-| T7.4 | 2 | Partial | New. Load, velocity and position come back in one 10-byte Sync Read and are published. First runs on the robot: values and timing as expected; the byte stuffing bug is fixed (library `0a49c5c`) and confirmed (0 failures in 2,950 reads). Open: units and longer runs. |
+| T7.4 | 2 | Done | New. Load, velocity and position come back in one 10-byte Sync Read and are published (`f1f0a2c`). Verified on the robot: values and timing as expected, units confirmed by the bench experiment, byte stuffing fixed (library `0a49c5c`, 0 failures in 2,950 reads). Left over: the rare read timeout (~1 per 3,000 cycles, first run) is not explained. |
 | T7.15 | 2 | Open | New, from the first bench data. A loaded leg lags its servo profile by ~100 ms and stops short of the goal: tune the position controller. |
 | T7.14 | 2 | Done | New. Bench experiment for the servo profile mode: all 103 runs on the robot, 2026-10-12. Result in [plan §6.3](servo-profile-bench-experiment.md): velocity-based computed profile if profiles are used, no sync benefit, servo lag is the issue (T7.15). |
 | T7.13 | 2 | Open | New, low priority. Byte stuffing in the library costs ~0.12 ms per bus transaction in the Debug build; do it in one pass. |
@@ -521,7 +523,10 @@ makes `PERIF_Dynamixel_Init` halt) and step 3.
 **Source:** [`design.md`](design.md) §7.1, Appendix A.2.
 **Effort:** S.
 **Depends on:** register map confirmed against the XL430-W250-2 control table.
-**Status:** **implemented, not yet verified on the robot.** The servo task reads
+**Status:** **done (2026-10-13).** Verified on the robot: the load, timing and byte
+stuffing checks below, and the units by the bench experiment (T7.14: velocity
+0.229 rpm per unit, position and velocity registers read consistently with the
+profile registers). Left over: the rare read timeouts, not explained. The servo task reads
 registers 126–135 for every servo with `dynamixel_get_bytes_multiple` (10 bytes:
 load int16, velocity int32, position uint32) and publishes `load_pct[6][3]`
 (0.1 % units converted to %) and `velocity_radps[6][3]` in `servo_shared_state`
@@ -529,8 +534,7 @@ through `servo_set_load_and_velocity()` / `servo_copy_load()` /
 `servo_copy_velocity()`. The values are in the **servo frame**: the signs are not
 the compensated joint frame (`compensate()` flips the femur sign). A
 `[LOAD] f/t %: ...` debug line with the femur and tibia load of all legs is
-printed every 5 s. Open: the bench checks below, and confirming the register
-addresses and units against the control table (they are from memory).
+printed every 5 s. The register addresses and units were confirmed on the robot.
 
 **First run on the robot (log of 2026-10-11).** Read time 3.49/3.61–3.65/3.94 ms
 (min/avg/max), as modelled (3.72 ms). No CRC errors, UART errors, dropped bytes
@@ -541,7 +545,7 @@ or alerts. Two findings:
   (`FF FF FF FF`) followed by a position whose low byte is `FD` triggers it, and
   the library did not remove it. Reproduced with a hand-built reply, fixed in
   the library (`0a49c5c`: stuffing of requests, un-stuffing of replies) and the
-  firmware pin bumped. To confirm: the next log should have no `len` errors.
+  firmware pin bumped. Confirmed: no `len` errors in 2,950 reads afterwards.
 - *Rare timeouts.* About one per 3,000 cycles, always blamed on servo index 0,
   which means no reply at all (the request was lost or the first reply was
   missed). Each costs the 10 ms timeout and the 5 ms reset, and shows as one
@@ -617,19 +621,14 @@ is a second indicator for contact detection (T7.6); changing the gains changes i
 **Plan:** [`servo-profile-bench-experiment.md`](servo-profile-bench-experiment.md).
 **Effort:** M for the harness and analysis script (done), plus about an hour on the
 bench.
-**Status:** **done (2026-10-12), results in plan §6.3. The code is on the branch `bench-test`, not on `main`.** *(Earlier status:)* dry run passed, the full run was next. On 2026-10-12 the first dry run
-aborted in the third run because the start pose move demanded an accuracy a loaded
-joint cannot give, and the experiment left its profile in the servos; both are fixed
-(plan §6.1). The second dry run passed all checks (plan §6.2): directions, unit
-constants, self test. The drive mode switch to time-based mode is not covered by the dry
-run and happens for the first time in the full run. Built and host-tested on 2026-10-12: the bench
-firmware (`Core/Src/bench_profile.c`, `bench_script.c`, presets `BenchDry` for the
-dry run and `Bench` for the 103 runs of the full experiment), the analysis script
-(`tools/bench_profile_analyze.py`) and their tests (`sh tests/run_host_tests.sh`).
-The LEDs of leg 0 are on while it runs, the start pose is checked for room, and
-matplotlib is in `tools/.venv` for the plots. The steps to prepare the robot, flash and
-capture are in section 5 of the plan. Open: the dry run on the robot, then the full run,
-then section 6 of the plan.
+**Status:** **done (2026-10-12), results in plan §6.3.** The code (bench firmware
+`Core/Src/bench_profile.c` and `bench_script.c`, presets `BenchDry` and `Bench`, the
+analysis script `tools/bench_profile_analyze.py` and their tests) is on the branch
+`bench-test`, not on `main`. The dry runs and the full run of 103 runs on leg 0 went
+through; the harness problems found on the way are in plan §6.1. The steps to prepare the
+robot, flash and capture are in section 5 of the plan. A rerun with the fixed images is
+possible (a control run without profile in the second half would settle the question of the
+pose offset after the drive mode switch).
 **Depends on:** nothing; T7.4 (done) gives the read it builds on.
 **Needed by:** T4.1 and T4.2, which should not start before the result.
 
@@ -642,7 +641,7 @@ interpolation, from three open questions: does the motion chain smoothly across
 goals, do joints with different travel arrive together in time-based mode, and
 what happens when the requested time is too short.
 
-**Verify.** Section 7 of the plan filled in, T4.1/T4.2 and
+**Verify.** Done: results in section 6.3 of the plan, T4.1/T4.2 and
 `servo-velocity-control-phase2.md` updated to match.
 
 
@@ -1072,7 +1071,7 @@ re-grouped).
 |----------------|-----------|
 | 30 min on the couch | Phase 1 hygiene (T2.3, T2.5, T2.6, T2.9), T7.1 |
 | One evening | A single Phase 1 item (T1.6, T2.12, T1.2, T2.13) |
-| A weekend | One Phase 2 item (T4.1, T7.3, T7.4) or T7.5 |
+| A weekend | One Phase 2 item (T7.15, T4.1, T7.3) or T7.5 |
 | A focused week | T4.1 + T4.2, or T7.6 (contact), or T7.5 + the Pi test sender |
 | A long break | The motion core: T7.8 + T7.9 + T7.10, with T7.7 first so it can be verified in sim |
 
