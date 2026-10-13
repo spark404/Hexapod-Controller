@@ -4,6 +4,7 @@
 Debug/
 Release/
 cmake-build-*/
+build/
 
 # Mac
 .DS_Store
