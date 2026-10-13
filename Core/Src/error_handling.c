@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include "cmsis_gcc.h"
 #include "stm32f401xe.h"
+#include "log_sink_port.h"
 
 void error_print_backtrace_from_sp(uint32_t *sp)
 {
@@ -30,6 +31,7 @@ void error_print_backtrace(void)
 void hardfault_c(uint32_t *sp)
 {
     __disable_irq();
+    log_sink_uart_panic();   /* queued log output has to go out by polling from here */
 
     uint32_t r0  = sp[0];
     uint32_t r1  = sp[1];

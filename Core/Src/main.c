@@ -38,6 +38,7 @@
 #include "bno055.h"
 
 #include "ring_buffer.h"
+#include "log_sink_port.h"
 
 #include "dynamixel/dynamixel.h"
 
@@ -152,6 +153,8 @@ TIM_HandleTypeDef htim1;
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart6;
+DMA_HandleTypeDef hdma_usart1_rx;
+DMA_HandleTypeDef hdma_usart1_tx;
 DMA_HandleTypeDef hdma_usart6_tx;
 DMA_HandleTypeDef hdma_usart6_rx;
 
@@ -444,6 +447,9 @@ int main(void)
   MX_TIM1_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+
+    // From here printf() queues into a buffer drained by DMA instead of busy-waiting
+    log_sink_uart_init();
 
     HAL_TIM_Base_Start(&htim1);
 
@@ -967,9 +973,15 @@ static void MX_DMA_Init(void)
   /* DMA2_Stream1_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream1_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream1_IRQn);
+  /* DMA2_Stream2_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
   /* DMA2_Stream6_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream6_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream6_IRQn);
+  /* DMA2_Stream7_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 5, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream7_IRQn);
 
 }
 
@@ -1323,6 +1335,10 @@ ssize_t usart_write(const uint8_t *src, const size_t len, const uint32_t timeout
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+    if (log_sink_uart_tx_cplt(huart)) {
+        return;
+    }
+
     if (huart != &huart6) {
         return;
     }
@@ -1366,6 +1382,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
 }
 
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+    if (log_sink_uart_error(huart)) {
+        return;
+    }
+
     if (huart != &huart6) {
         return;
     }
@@ -2946,6 +2966,7 @@ void Error_Handler(void)
 
     /* User can add his own implementation to report the HAL error return state */
     __disable_irq();
+    log_sink_uart_panic();   // queued log output has to go out by polling from here
 
     /* Set indicator LED to red */
     HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_RESET);

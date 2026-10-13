@@ -78,6 +78,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         Core/Src/attitude_ekf.c
         Core/Src/ring_buffer.c
         Core/Src/bus_diag.c
+        Core/Src/log_sink.c
+        Core/Src/log_sink_port.c
         Core/Src/error_handling.c
         Drivers/BMI08X/Src/bmi08a.c
         Drivers/BMI08X/Src/bmi08g.c
