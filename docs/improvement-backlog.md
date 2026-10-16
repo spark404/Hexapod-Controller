@@ -43,8 +43,8 @@ motion-profile work (T4.x) is specified in
 
 | Phase | Theme | Active items |
 |------:|-------|-------------:|
-| 1 | Foundations and safety | 14 (1 done) |
-| 2 | Servo bus and actuation | 9 (2 done) |
+| 1 | Foundations and safety | 14 (1 done, 1 moot) |
+| 2 | Servo bus and actuation | 10 (2 done) |
 | 3 | Command interface | 1 |
 | 4 | Frames, sensing and contact | 5 |
 | 5 | Motion core | 4 |
@@ -79,14 +79,21 @@ the bench experiment used the same registers), T7.14 is done and T7.15 was added
 Updated 2026-10-16: T4.1 is implemented (commit `cb73897`, not yet verified on the
 robot), which makes T2.4 moot. T4.2 is implemented too (commit `2fca015`, not yet
 verified on the robot).
+Updated 2026-10-16 (later): T7.5 ran on the robot in four slices; T1.6 is partly done
+(non-blocking log output, the control loop debug lines removed, the periodic reports
+consolidated); T2.12 has a compact stack report; T4.1 and T4.2 ran on the robot during the
+link tests (stand-up and short walks, no bus write failures; the quality of the motion is
+not assessed yet). The frames of the controller are analysed in
+[`frames-analysis.md`](frames-analysis.md) (T5.2, T7.8). The ROTATING state of the controller
+raised a fatal joint limit alert on the robot (see T7.5 and T7.8).
 
 | Item | Phase | Status | Note |
 |------|:-----:|--------|------|
 | T1.1 | 1 | Partial | Clamps re-bound in `517cb38`: control `[0.05, 0.2]` s, servo `[0.01, 0.04]` s. `CTRL_LOOP_DT_S` still defined and unused (T2.6). |
 | T1.2 | 1 | Open | No `fault_code`, `CTRL_FAULT` or `SERVO_FAULT_HOLD`; `SERVO_ERROR` still calls `Error_Handler()`. |
 | T1.5 | 1 | Open | No `target_seq` / `actual_seq`. |
-| T1.6 | 1 | Open | `printf` busy-waits on USART1 at 115200; ~57 % CPU in WALKING. |
-| T2.12 | 1 | Open | No run-time stats, stack or heap reporting; mutex leak in gyro/accel tasks. |
+| T1.6 | 1 | Partial | Output is non-blocking: a ring buffer drained by USART1 DMA (`e089914`, ran on the robot). The per-tick control debug lines (`c677613`) and the per-frame SPI log lines are removed; the periodic reports are consolidated (`9f97ea9`). Open: the default level is still DEBUG, the CPU measurement (needs T2.12), the panic flush (fatal errors) was not exercised. |
+| T2.12 | 1 | Partial | Stack usage is one line every 5 minutes, a warning when a task has under 20 % free (`9f97ea9`). Open: run-time stats and CPU %, heap, cycle counters around `controller_update`, mutex leak in the gyro/accel tasks. |
 | T2.13 | 1 | Partial | Runs from the 16 MHz HSE with an HSI fallback (`2b0e064`); boots at 84 MHz. Open: power-cycle test, MCO measurement, load-cap decision (board has 15 pF caps, crystal wants 8 pF). |
 | T2.3 | 1 | Open | `wrap_to_pi` still `fmodf`-based (`[-π, π)`). |
 | T2.4 | 1 | Moot | `last_velocity` and `last_ticks` deleted with the software interpolation (T4.1, `cb73897`). |
@@ -97,26 +104,24 @@ verified on the robot).
 | T7.1 | 1 | Partial | New. Overruns are now counted (T7.12) and reported; re-anchoring `tick_count` is not done. |
 | T7.12 | 1 | Done | New. Servo bus diagnostics every 30 s (`34e582f`). |
 | T3.5 | 2 | Open | No related code. |
-| T4.1 | 2 | Partial | Implemented (`cb73897`): fixed profile with every goal, software interpolation removed. Not yet verified on the robot. |
-| T4.2 | 2 | Partial | Implemented (`2fca015`): v and a per joint per goal, measured from the servo's Position Trajectory, acceleration floor 40 rad/s². `SERVO_PROFILE_MODE` switches back to the fixed profile. Not yet verified on the robot; T factor and ramp not yet chosen from the E4 data. |
+| T4.1 | 2 | Partial | Implemented (`cb73897`): fixed profile with every goal, software interpolation removed. Ran on the robot on 2026-10-16 (stand-up, short walks, no write failures); the motion quality is not assessed. |
+| T4.2 | 2 | Partial | Implemented (`2fca015`): v and a per joint per goal, measured from the servo's Position Trajectory, acceleration floor 40 rad/s². `SERVO_PROFILE_MODE` switches back to the fixed profile. Ran on the robot on 2026-10-16 (writes 1.95 ms at about 10 Hz, no failures); the motion quality is not assessed, T factor and ramp not yet chosen from the E4 data. |
 | T7.2 | 2 | Open | New. |
 | T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
-| T7.4 | 2 | Done | New. Load, velocity and position come back in one 10-byte Sync Read and are published (`f1f0a2c`). Verified on the robot: values and timing as expected, units confirmed by the bench experiment, byte stuffing fixed (library `0a49c5c`, 0 failures in 2,950 reads). Left over: the rare read timeout (~1 per 3,000 cycles, first run) is not explained; it
-rose to 2-5 per 30 s when the SPI link started and went back down with the interrupt priority
-change (T7.5). |
+| T7.4 | 2 | Done | New. Load, velocity and position are read in one Sync Read (now 18 bytes, see the item) and published (`f1f0a2c`). Verified on the robot: values and timing as expected, units confirmed by the bench experiment, byte stuffing fixed (library `0a49c5c`, 0 failures in 2,950 reads). Left over: the rare read timeout (about 1 per 3,000 cycles); it rose to 2-5 per 30 s when the SPI link started and went away with the interrupt priority change (T7.5). |
 | T7.16 | 2 | Open | New, next after T4.1/T4.2 are seen on the robot. Write the goals when the controller publishes, not on the next 50 Hz servo tick. |
 | T7.15 | 2 | Open | New, from the first bench data. A loaded leg lags its servo profile by ~100 ms and stops short of the goal: tune the position controller. |
 | T7.14 | 2 | Done | New. Bench experiment for the servo profile mode: all 103 runs on the robot, 2026-10-12. Result in [plan §6.3](servo-profile-bench-experiment.md): velocity-based computed profile if profiles are used, no sync benefit, servo lag is the issue (T7.15). |
 | T7.13 | 2 | Open | New, low priority. Byte stuffing in the library costs ~0.12 ms per bus transaction in the Debug build; do it in one pass. |
 | T7.5 | 3 | Partial | New. Slices 1 to 4 built and run on the robot: frames and CRC (`cmd_frame.c`), twist adapter with `T_LINK` (`command_adapter.c`), shared command state (`cmd_link.c`), 31-byte full-duplex SPI task in `main.c`, Pi side `SpiLink` in `poom-remote` at 200 kHz. Walk, stop, Poom out of range and daemon kill all stop the robot within 0.6 s. SPI1/USART1 interrupt priority 6 removed the servo 0 read timeouts. Open: walking test, heading lead fix, Poom firmware. Rotation blocked by a controller fault (rotate logic). The 7-byte frames of the old interface are gone. |
 | T5.1 | 4 | Open | Reach radius is a fixed 40 mm. |
-| T5.2 | 4 | Open | `attitude` still discarded (`(void)attitude`). |
+| T5.2 | 4 | Open | `attitude` still discarded (`(void)attitude`), the caller passes zeros. See [`frames-analysis.md`](frames-analysis.md). |
 | T5.3 | 4 | Open | Open-loop body pose integration. |
 | T7.6 | 4 | Open | New. |
 | T7.7 | 4 | Open | New. |
 | T5.6 | 5 | Open | No e-stop path. |
 | T7.10 | 5 | Open | New. Today: `POWERDOWN` drops torque from standing. |
-| T7.8 | 5 | Open | New. Today: separate WALKING / ROTATING, `(velocity, heading)` input. |
+| T7.8 | 5 | Open | New. Today: separate WALKING / ROTATING, `(velocity, heading)` input. ROTATING raised a fatal joint limit alert on 2026-10-16; see T7.5 and [`frames-analysis.md`](frames-analysis.md). |
 | T7.9 | 5 | Open | New. Today: event-driven tripod swap. |
 | T6.3 | 6 | Open |  |
 | T7.11 | 6 | Open | New. |
@@ -149,6 +154,18 @@ Independent of the new design and a prerequisite for most of it. Do these first,
 
 **Source:** [`design.md`](design.md) Appendix B.3.
 **Effort:** S.
+**Status:** **partly done (2026-10-16).**
+- Step 3 is done (`e089914`): `printf` goes through `log_sink.c`, a ring buffer drained by
+  USART1 DMA. A message is accepted or dropped as a whole and a dropped message is announced
+  (`[log] N message(s) dropped`). `Error_Handler()` and `hardfault_c()` call
+  `log_sink_uart_panic()` so the fatal report is still sent by polling; that path has not been
+  exercised. It ran on the robot during the link tests; no messages were dropped.
+- Step 2 is done by removal, not by a flag: the per-tick control debug lines (`c677613`), the
+  per-frame lines of the SPI task (one rate-limited warning instead) and the 25 s sensor
+  lines, replaced by one `[Sensors]` line every 30 s together with the bus summary
+  (`9f97ea9`).
+- Step 1 is open: the default `g_log_level` is still `LOG_LEVEL_DEBUG`.
+- The CPU figures under *Verify* need T2.12.
 
 **Do.**
 1. Set the default `g_log_level` to `LOG_LEVEL_INFO` (or `WARN` for release
@@ -174,6 +191,10 @@ Independent of the new design and a prerequisite for most of it. Do these first,
 
 **Source:** [`design.md`](design.md) Appendix B.4–B.5.
 **Effort:** S.
+**Status:** **partly done (2026-10-16).** The stack usage of all tasks is reported as one line
+every 5 minutes (`[Stack] free/total bytes: ...`), as a warning with the tasks marked `!` when
+one has under 20 % free (`9f97ea9`). Run-time stats and CPU %, the heap, the cycle counter
+around `controller_update` and the mutex leak are still open.
 
 **Do.** Enable FreeRTOS run-time stats with the DWT cycle counter as the timer;
 log per-task CPU %, `uxTaskGetStackHighWaterMark` per task and
@@ -474,7 +495,9 @@ The XL430 can do this in hardware via `PROFILE_VELOCITY` /
 task, deadband-quantization issues (§4.4 interaction review) go
 away.
 
-**Status:** **implemented (2026-10-16), not yet verified on the robot.** Commits
+**Status:** **implemented (2026-10-16); ran on the robot the same day** (stand-up and short
+walks during the link tests, no bus write failures; the quality of the motion, smoothness and
+lag, has not been assessed). Commits
 `c93cd96` (units and packing in `Core/Src/servo_profile.c`, host test
 `tests/servo_profile_test.c`) and `cb73897` (servo task). What was built, against
 the plan below:
@@ -557,17 +580,19 @@ makes `PERIF_Dynamixel_Init` halt) and step 3.
 **Status:** **done (2026-10-13).** Verified on the robot: the load, timing and byte
 stuffing checks below, and the units by the bench experiment (T7.14: velocity
 0.229 rpm per unit, position and velocity registers read consistently with the
-profile registers). Left over: the rare read timeouts, not explained. Since T4.1
-(`cb73897`) the read is 18 bytes, registers 126–143, adding Velocity Trajectory and
-Position Trajectory. Before that the servo task read
-registers 126–135 for every servo with `dynamixel_get_bytes_multiple` (10 bytes:
-load int16, velocity int32, position uint32) and publishes `load_pct[6][3]`
-(0.1 % units converted to %) and `velocity_radps[6][3]` in `servo_shared_state`
-through `servo_set_load_and_velocity()` / `servo_copy_load()` /
-`servo_copy_velocity()`. The values are in the **servo frame**: the signs are not
-the compensated joint frame (`compensate()` flips the femur sign). A
-`[LOAD] f/t %: ...` debug line with the femur and tibia load of all legs is
-printed every 5 s. The register addresses and units were confirmed on the robot.
+profile registers). The register addresses and units were confirmed on the robot.
+Left over: the rare read timeouts, see below.
+
+**What it does.** The servo task reads, for every servo, one contiguous block with
+`dynamixel_get_bytes_multiple` and publishes `load_pct[6][3]` (0.1 % units converted to
+%) and `velocity_radps[6][3]` in `servo_shared_state` through
+`servo_set_load_and_velocity()` / `servo_copy_load()` / `servo_copy_velocity()`. The
+block was 10 bytes (registers 126–135: load int16, velocity int32, position uint32). Since
+T4.1 (`cb73897`) it is 18 bytes (registers 126–143), adding Velocity Trajectory and
+Position Trajectory for the per-goal profile of T4.2; the read takes 4.5 ms instead of
+3.7 ms. The values are in the **servo frame**: the signs are not the compensated joint
+frame (`compensate()` flips the femur sign). A `[LOAD] f/t %: ...` debug line with the
+femur and tibia load of all legs is printed every 5 s.
 
 **First run on the robot (log of 2026-10-11).** Read time 3.49/3.61–3.65/3.94 ms
 (min/avg/max), as modelled (3.72 ms). No CRC errors, UART errors, dropped bytes
@@ -583,6 +608,10 @@ or alerts. Two findings:
   which means no reply at all (the request was lost or the first reply was
   missed). Each costs the 10 ms timeout and the 5 ms reset, and shows as one
   loop overrun. Not explained yet; the earlier 4,500-read window had none.
+  *Update 2026-10-16:* with the SPI link of T7.5 running they rose to 2 to 5 per 30 s,
+  still always on servo 0. Setting the SPI1 and USART1 interrupt priorities to 6, below
+  the servo bus handlers (`327a4d3`), brought them to 0 in 4,500 reads; the background
+  rate of about 1 per 3,000 is probably still there (one in the boot window).
 
 Load observations, servo frame, % of maximum (design §7.1): standing, femur
 −11 to −20 and tibia −12 to +2; lifted, femur −3 to +3 and tibia −8 to 0. The
@@ -603,7 +632,8 @@ Behavior changes that came with it:
   leg × 3 + joint), which answers the per-servo attribution follow-up in T7.12.
 
 **Do.** Extend the per-tick Sync Read to start at Present Load and cover Present
-Velocity and Present Position in one contiguous read (10 bytes per servo).
+Velocity and Present Position in one contiguous read (10 bytes per servo at the time,
+18 now).
 Publish `load[6][3]` and `velocity[6][3]` in `servo_shared_state` through
 critical-section helpers. No behavior change yet.
 
@@ -794,8 +824,9 @@ joint-space interpolation chooses. Phase 2 scales
 `PROFILE_VELOCITY` per joint per tick so all joints in a leg
 finish together, preserving the planned trajectory.
 
-**Status:** **implemented (2026-10-16), not yet verified on the robot** (commit
-`2fca015`). As built, replacing the implementation note's steps:
+**Status:** **implemented (2026-10-16); ran on the robot the same day** (commit `2fca015`; the
+write of 12 bytes per servo takes 1.95 ms at about 10 Hz, no failures; the quality of the
+motion has not been assessed). As built, replacing the implementation note's steps:
 - The servo task, not the controller, computes the profile (`servo_computed_profiles()`
   in `main.c`). Per joint, Δ = the new goal − the servo's **Position Trajectory**, read
   in the same tick. Not the previous goal: with T longer than the period the profile
@@ -889,16 +920,17 @@ The Pi-facing protocol: one atomic command, CRC, status reply and link supervisi
 **Source:** [`design.md`](design.md) §3.
 **Effort:** M.
 **Depends on:** T1.6.
-**Status:** in progress, in slices. Slice 1 (the frame, CRC, status frame and sequence
-handling: `Core/Src/cmd_frame.c`, host test `tests/cmd_frame_test.c`) is done and
-fixes the layout (31 bytes, design §3.2). To do: the adapter from the twist to the
-current controller input with `T_LINK` (slice 2, `Core/Src/command_adapter.c`), the
-shared command state and full-duplex SPI task (slice 3, `cmd_link.c` and `main.c`: built,
-host tested, **not run on the robot yet**), the Pi side `SpiSink` in `poom-remote`
-(slice 4, built and tested against a fake controller, off by default: `src/link.rs` and
-`src/frame.rs` in `poom-remote`). With slice 3 the 7-byte frames of the old interface are
-no longer accepted (`gamepad_spi_service.py` stops working). The controller logic is not
-changed until T7.8.
+**Status:** **built in four slices and run on the robot (2026-10-16); open items below.**
+1. Frames (`Core/Src/cmd_frame.c`, host test `tests/cmd_frame_test.c`): the 31-byte layout
+   of design §3.2, CRC-16, status frame, sequence handling.
+2. Adapter (`Core/Src/command_adapter.c`): the twist into the controller's input
+   (speed along its heading, absolute heading, height), limits, speed slew and `T_LINK`.
+   The controller logic is not changed until T7.8.
+3. Shared command state and the full-duplex SPI task (`cmd_link.c`, `main.c`). The 7-byte
+   frames of the old interface are no longer accepted (`gamepad_spi_service.py` stops working).
+4. Pi side in `poom-remote` (`src/link.rs`, `src/frame.rs`): a frame every 40 ms with the
+   latest intent, status read back, off by default. The same daemon watches GPIO22 (MCU
+   power) and GPIO17 (NRST) read-only.
 
 **Results on the robot (2026-10-16).**
 - *Link:* works, the controller reports its state and `link_ok`. Lag from the `up` button to
@@ -963,6 +995,8 @@ The sensing the motion core depends on: level frame from the IMU, ground contact
 
 **Source:** [`controller-audit.md`](controller-audit.md) §3.4 D10.
 **Effort:** L.
+**See also:** [`frames-analysis.md`](frames-analysis.md): how the frames are used today and
+what changes for world, level, body and leg.
 
 **Do.** Pre-multiply the body-to-world transform by the EKF's
 estimated roll/pitch before computing leg targets. The simplest
@@ -1080,6 +1114,10 @@ The rewrite of walking and rotating: twist model, gait clock, support rules and 
 **Effort:** L.
 **Depends on:** T7.5 (command type), T1.1; level frame (T5.2) can start as the
 identity.
+**See also:** [`frames-analysis.md`](frames-analysis.md). The ROTATING state, which this item
+removes, raised a fatal joint limit alert on 2026-10-16 (leg 0, coxa, ±0.79 rad; see T7.5);
+it can be reproduced in the simulator first, where the ROTATING code is the same
+(`HexapodSim/Controller/tests/controller_equivalence` keeps the two copies in step).
 
 **Do.**
 1. Take `(vx, vy, wz)` in the level frame and compute each foot's velocity
@@ -1246,7 +1284,7 @@ item.
 | T2.1 | T7.8 | Pacing comes from the fastest foot, not `fminf(stance, swing)`. |
 | T2.2 | T7.8 | Per-foot velocity `u_i = v + wz × h_i` uses the home position `h_i`. |
 | T2.7 | T7.10 | Re-anchoring on entering a motion state is part of the new state entry rules. |
-| T2.8 | T7.8 | Each foot has its own `|u_i|` by construction. |
+| T2.8 | T7.8 | Each foot has its own `\|u_i\|` by construction. |
 | T2.10 | T7.9 | Foot-outside-disk is a safety net inside the gait scheduler. |
 | T2.11 | T7.5 | The single command frame replaces the per-parameter globals. |
 | T3.1 | T7.8 | Cycle-time bounds are part of the stride and cycle model. |
