@@ -101,12 +101,14 @@ verified on the robot).
 | T4.2 | 2 | Partial | Implemented (`2fca015`): v and a per joint per goal, measured from the servo's Position Trajectory, acceleration floor 40 rad/s². `SERVO_PROFILE_MODE` switches back to the fixed profile. Not yet verified on the robot; T factor and ramp not yet chosen from the E4 data. |
 | T7.2 | 2 | Open | New. |
 | T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
-| T7.4 | 2 | Done | New. Load, velocity and position come back in one 10-byte Sync Read and are published (`f1f0a2c`). Verified on the robot: values and timing as expected, units confirmed by the bench experiment, byte stuffing fixed (library `0a49c5c`, 0 failures in 2,950 reads). Left over: the rare read timeout (~1 per 3,000 cycles, first run) is not explained. |
+| T7.4 | 2 | Done | New. Load, velocity and position come back in one 10-byte Sync Read and are published (`f1f0a2c`). Verified on the robot: values and timing as expected, units confirmed by the bench experiment, byte stuffing fixed (library `0a49c5c`, 0 failures in 2,950 reads). Left over: the rare read timeout (~1 per 3,000 cycles, first run) is not explained; it
+rose to 2-5 per 30 s when the SPI link started and went back down with the interrupt priority
+change (T7.5). |
 | T7.16 | 2 | Open | New, next after T4.1/T4.2 are seen on the robot. Write the goals when the controller publishes, not on the next 50 Hz servo tick. |
 | T7.15 | 2 | Open | New, from the first bench data. A loaded leg lags its servo profile by ~100 ms and stops short of the goal: tune the position controller. |
 | T7.14 | 2 | Done | New. Bench experiment for the servo profile mode: all 103 runs on the robot, 2026-10-12. Result in [plan §6.3](servo-profile-bench-experiment.md): velocity-based computed profile if profiles are used, no sync benefit, servo lag is the issue (T7.15). |
 | T7.13 | 2 | Open | New, low priority. Byte stuffing in the library costs ~0.12 ms per bus transaction in the Debug build; do it in one pass. |
-| T7.5 | 3 | Partial | New. Slices 1 to 4 built: frames and CRC (`cmd_frame.c`), twist adapter with `T_LINK` (`command_adapter.c`), shared command state (`cmd_link.c`), 31-byte full-duplex SPI task in `main.c`, and the Pi side `SpiLink` in `poom-remote`; host tested on both sides, **not run on the robot**. Open: the bench test, then the Poom firmware. The 7-byte frames of the old interface are gone. |
+| T7.5 | 3 | Partial | New. Slices 1 to 4 built and run on the robot: frames and CRC (`cmd_frame.c`), twist adapter with `T_LINK` (`command_adapter.c`), shared command state (`cmd_link.c`), 31-byte full-duplex SPI task in `main.c`, Pi side `SpiLink` in `poom-remote` at 200 kHz. Walk, stop, Poom out of range and daemon kill all stop the robot within 0.6 s. SPI1/USART1 interrupt priority 6 removed the servo 0 read timeouts. Open: walking test, heading lead fix, Poom firmware. Rotation blocked by a controller fault (rotate logic). The 7-byte frames of the old interface are gone. |
 | T5.1 | 4 | Open | Reach radius is a fixed 40 mm. |
 | T5.2 | 4 | Open | `attitude` still discarded (`(void)attitude`). |
 | T5.3 | 4 | Open | Open-loop body pose integration. |
@@ -895,14 +897,38 @@ shared command state and full-duplex SPI task (slice 3, `cmd_link.c` and `main.c
 host tested, **not run on the robot yet**), the Pi side `SpiSink` in `poom-remote`
 (slice 4, built and tested against a fake controller, off by default: `src/link.rs` and
 `src/frame.rs` in `poom-remote`). With slice 3 the 7-byte frames of the old interface are
-no longer accepted (`gamepad_spi_service.py` stops working). First run on the robot (2026-10-16): the link works,
-the controller reports `standing` and `link_ok`. At 500 kHz about 2-3 % of the status
-replies arrived damaged (bursts; the slave's interrupt driven transfer in the Debug build
-cannot keep up, each byte takes 16 us); at 200 kHz there were none in about 4500 frames, so
-200 kHz is the Pi's default. DMA for SPI1 in CubeMX or a Release build would allow more.
-Open: the bench test with motion (stop the `poom-remote` service when flashing, the bootloader
-shares the bus). The controller logic is not changed
-until T7.8.
+no longer accepted (`gamepad_spi_service.py` stops working). The controller logic is not
+changed until T7.8.
+
+**Results on the robot (2026-10-16).**
+- *Link:* works, the controller reports its state and `link_ok`. Lag from the `up` button to
+  WALKING 0.1 s; after release the controller is back in STANDING after 0.3 s (the 0.25 s
+  speed slew plus a control tick).
+- *Dead-man paths* (all stop the robot, timings are the controller state change, not the legs):
+  Poom out of range, the daemon's 300 ms watchdog sends the stop intent, STANDING 0.30 s later
+  (0.59 s after the last heartbeat); daemon killed with `kill -9` while walking, the controller's
+  own `T_LINK` takes it to STANDING 0.51 s after the kill (design worst case 0.65 s).
+- *SPI clock:* at 500 kHz about 2-3 % of the status replies arrived damaged (bursts, repeated
+  bytes: the interrupt driven slave in the Debug build cannot keep up, a byte takes 16 us); at
+  200 kHz none in about 4500 frames, so 200 kHz is the Pi's default. An occasional rejected
+  command (one in about 11000 frames) was seen at a power down transition.
+- *Interrupt priorities:* with the link running, sync reads timed out 2 to 5 times per 30 s,
+  always on servo 0 (the first one to reply); none without SPI traffic. SPI1, USART1 and the
+  USART1 DMA streams are now priority 6, the servo bus handlers (USART6, DMA2 Stream1 and
+  Stream6) stay at 5 (`327a4d3`). Afterwards: 0 failed reads in three 30 s windows with the
+  link active (4500 reads), one in the boot window, read time unchanged at 4.5 ms. A longer
+  run while walking is still to do.
+- *Rotation:* the ROTATING state of the controller raised a fatal joint limit alert (leg 0,
+  axis 0) during the first test and halted the firmware (torque stays on, the SPI slave
+  answers a constant byte). A flaw in the rotate logic of the controller, not of the link;
+  no rotation is commanded in link tests until it is fixed.
+- *Known, not fixed:* the adapter integrates the commanded heading while the controller
+  cannot follow yet (power down, SYNCING, STANDUP): after waking with a turn command held,
+  releasing it leaves a rotation to catch up. Bounding the heading lead to the actual yaw
+  fixes it; bundle it with the next firmware change.
+
+Open: walking test with the bus diagnostics, the Poom firmware, the heading lead fix. Stop
+the `poom-remote` service when flashing, the bootloader shares the SPI bus.
 
 **Do.**
 1. Define the single fixed-size command frame (`magic`, `version`, `seq`,
