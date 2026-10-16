@@ -895,8 +895,13 @@ shared command state and full-duplex SPI task (slice 3, `cmd_link.c` and `main.c
 host tested, **not run on the robot yet**), the Pi side `SpiSink` in `poom-remote`
 (slice 4, built and tested against a fake controller, off by default: `src/link.rs` and
 `src/frame.rs` in `poom-remote`). With slice 3 the 7-byte frames of the old interface are
-no longer accepted (`gamepad_spi_service.py` stops working). Open: the bench test with the
-real Pi (stop the `poom-remote` service when flashing, the bootloader shares the bus). The controller logic is not changed
+no longer accepted (`gamepad_spi_service.py` stops working). First run on the robot (2026-10-16): the link works,
+the controller reports `standing` and `link_ok`. At 500 kHz about 2-3 % of the status
+replies arrived damaged (bursts; the slave's interrupt driven transfer in the Debug build
+cannot keep up, each byte takes 16 us); at 200 kHz there were none in about 4500 frames, so
+200 kHz is the Pi's default. DMA for SPI1 in CubeMX or a Release build would allow more.
+Open: the bench test with motion (stop the `poom-remote` service when flashing, the bootloader
+shares the bus). The controller logic is not changed
 until T7.8.
 
 **Do.**
