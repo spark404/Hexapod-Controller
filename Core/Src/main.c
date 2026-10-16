@@ -47,6 +47,7 @@
 #include "robot.h"
 #include "calculator.h"
 #include "servos.h"
+#include "servo_profile.h"
 #include "log.h"
 #include "bus_diag.h"
 #include "dynamixel/protocol.h"
@@ -125,10 +126,22 @@ MATRIX(M, 4)
 #define RX_DMA_ERROR 0x8
 #define TX_DMA_TC 0x01
 
-#define SERVO_MAX_VELOCITY      8.0f    // rad/s
-#define SERVO_MAX_ACCELERATION  40.0f   // rad/s²
-#define SERVO_DEADBAND_RAD      0.002f  // ≈ 0.11°
-#define SERVO_MIN_STEP_RAD      0.003f  // ≈ 0.17°
+// The servos interpolate between the goals, with a profile written with every goal:
+//  FIXED    the same profile for every goal (T4.1)
+//  COMPUTED per joint, sized to cover the move in about one control period (T4.2)
+#define SERVO_PROFILE_MODE_FIXED    0
+#define SERVO_PROFILE_MODE_COMPUTED 1
+#define SERVO_PROFILE_MODE          SERVO_PROFILE_MODE_COMPUTED
+
+// Fixed profile: FIXED mode, and the first goals after a sync
+#define SERVO_PROFILE_VELOCITY      4.0f    // rad/s
+#define SERVO_PROFILE_ACCELERATION  40.0f   // rad/s²
+
+// Computed profile: T = factor x the duration of the targets, ramps of fraction x T.
+// T a little longer than the period: the next goal arrives in the last ramp, never
+// after a stop (bench E4 tested 0.8, 1.2 and 1.5).
+#define SERVO_PROFILE_T_FACTOR      1.2f
+#define SERVO_PROFILE_TR_FRACTION   0.25f
 
 // Blend rate for merging actual measurements into state
 #define ALPHA 1.0f
@@ -1834,22 +1847,28 @@ static uint32_t diag_elapsed_us(const uint32_t start_cycles)
     return (DWT->CYCCNT - start_cycles) / (SystemCoreClock / 1000000U);
 }
 
-/* Present Load (126, 2 bytes), Present Velocity (128, 4) and Present Position
- * (132, 4) are adjacent: one 10 byte read per servo gets all three. */
-#define XL430_STATE_LEN 10
+/* Present Load (126, 2 bytes), Present Velocity (128, 4), Present Position
+ * (132, 4), Velocity Trajectory (136, 4) and Position Trajectory (140, 4) are
+ * adjacent: one 18 byte read per servo gets all five. */
+#define XL430_STATE_LEN 18
 #define XL430_STATUS_ALERT 0x80
+#define XL430_PULSE_RAD (2.0f * (float32_t) M_PI / 4096.0f)
 
 /** What one read of the state of all servos returned. Indexed [leg][joint]. */
 typedef struct {
     uint32_t position[6][3];    /* pulses */
+    uint32_t profile_position[6][3];     /* Position Trajectory, pulses */
     float32_t load[6][3];       /* % of maximum, servo frame */
     float32_t velocity[6][3];   /* rad/s, servo frame */
+    float32_t tracking_error[6][3];      /* Position Trajectory - Present Position, rad, servo frame */
+    float32_t profile_velocity[6][3];    /* Velocity Trajectory, rad/s, servo frame */
     bool valid[6][3];           /* this servo returned data; otherwise the values above are untouched */
     bool link_error;            /* a timeout or bus error: the receiver needs a reset */
 } servo_read_t;
 
 /**
- * Sync Read of load, velocity and position of all servos, timed and counted.
+ * Sync Read of load, velocity, position and the profile's own velocity and
+ * position of all servos, timed and counted.
  *
  * Servos that returned data (including those reporting a hardware alert, whose
  * data is valid) are decoded into *out; the others are left untouched, so the
@@ -1884,6 +1903,10 @@ static dynamixel_result_t servo_bus_read_state(servo_read_t *out)
             out->load[s / 3][s % 3] = xl430_load_to_percent(dynamixel_decode_i16(&d[0]));
             out->velocity[s / 3][s % 3] = xl430_velocity_to_radps(dynamixel_decode_i32(&d[2]));
             out->position[s / 3][s % 3] = dynamixel_decode_u32(&d[6]);
+            out->profile_velocity[s / 3][s % 3] = xl430_velocity_to_radps(dynamixel_decode_i32(&d[10]));
+            out->profile_position[s / 3][s % 3] = dynamixel_decode_u32(&d[14]);
+            out->tracking_error[s / 3][s % 3] =
+                (float32_t) (dynamixel_decode_i32(&d[14]) - dynamixel_decode_i32(&d[6])) * XL430_PULSE_RAD;
             if (st == XL430_STATUS_ALERT) {
                 alerts++;
                 new_alert_mask |= 1UL << s;
@@ -1919,14 +1942,72 @@ static dynamixel_result_t servo_bus_read_state(servo_read_t *out)
     return outcome;
 }
 
-/** Sync Write of the goal position of all servos, timed and counted. */
-static dynamixel_result_t servo_bus_write_goals(const uint32_t *values)
+/** The fixed profile for all servos. */
+static void servo_fixed_profiles(uint32_t acceleration[6][3], uint32_t velocity[6][3])
 {
+    const uint32_t a = xl430_radps2_to_profile_acceleration(SERVO_PROFILE_ACCELERATION);
+    const uint32_t v = xl430_radps_to_profile_velocity(SERVO_PROFILE_VELOCITY);
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < 3; j++) {
+            acceleration[i][j] = a;
+            velocity[i][j] = v;
+        }
+    }
+}
+
+#if SERVO_PROFILE_MODE == SERVO_PROFILE_MODE_COMPUTED
+/**
+ * A profile per servo that covers the move to its new goal in about one
+ * control period. The move is measured from where the servo's own profile is
+ * (Position Trajectory, read this tick): it includes what is left of the
+ * previous goal, and unlike the measured position it does not lag. A servo
+ * that did not answer the read is measured from its previous goal.
+ */
+static void servo_computed_profiles(uint32_t goals[6][3], const servo_read_t *read,
+                                    uint32_t previous_goals[6][3], const float32_t duration_s,
+                                    uint32_t acceleration[6][3], uint32_t velocity[6][3])
+{
+    const float32_t time_s = SERVO_PROFILE_T_FACTOR * duration_s;
+    const float32_t ramp_s = SERVO_PROFILE_TR_FRACTION * time_s;
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < 3; j++) {
+            const uint32_t from = read->valid[i][j] ? read->profile_position[i][j] : previous_goals[i][j];
+            const float32_t delta_rad = (float32_t) ((int32_t) goals[i][j] - (int32_t) from) * XL430_PULSE_RAD;
+            servo_profile_compute(delta_rad, time_s, ramp_s, &velocity[i][j], &acceleration[i][j]);
+        }
+    }
+}
+#endif
+
+/**
+ * Sync Write of the profile and goal position of all servos, timed and
+ * counted: Profile Acceleration, Profile Velocity and Goal Position, 12 bytes
+ * per servo at address 108. Every goal carries its profile, so no value left
+ * in the servos' RAM (they keep it over a board reset) is ever used.
+ */
+static dynamixel_result_t servo_bus_write_goals(uint32_t goals[6][3], uint32_t acceleration[6][3],
+                                                uint32_t velocity[6][3])
+{
+    uint8_t data[18 * SERVO_PROFILE_BYTES];
+    servo_profile_pack(&acceleration[0][0], &velocity[0][0], &goals[0][0], 18, data);
+
     const uint32_t start = DWT->CYCCNT;
-    const dynamixel_result_t res = dynamixel_set_long_parameter_multiple(
-        dynamixel_servos, 18, XL430_CT_RAM_GOAL_POSITION, values);
+    const dynamixel_result_t res = dynamixel_set_bytes_multiple(
+        dynamixel_servos, 18, XL430_CT_RAM_PROFILE_ACC, SERVO_PROFILE_BYTES, data);
     bus_diag_record(BUS_OP_WRITE_GOAL, res, diag_elapsed_us(start));
     return res;
+}
+
+/** Joint targets (compensated frame) to goal positions in pulses. */
+static void servo_targets_to_goals(float32_t targets[6][3], uint32_t goals[6][3])
+{
+    float32_t angles[3];
+    for (int i = 0; i < 6; i++) {
+        uncompensate(targets[i], angles);
+        goals[i][0] = xl430_rad_centered_to_pulse(angles[0]);
+        goals[i][1] = xl430_rad_centered_to_pulse(angles[1]);
+        goals[i][2] = xl430_rad_centered_to_pulse(angles[2]);
+    }
 }
 
 /* USER CODE END 4 */
@@ -2640,7 +2721,7 @@ void StartControlTask(void *argument)
           target_joint_angles[i][1] = current_leg_state->next_joint_angles[1];
           target_joint_angles[i][2] = current_leg_state->next_joint_angles[2];
       }
-      servo_set_target_joint_angles(&servo_shared_state, target_joint_angles);
+      servo_set_target_joint_angles(&servo_shared_state, target_joint_angles, dt_s);
 
       tick_count += CONTROL_LOOP_INTERVAL;
       osDelayUntil(tick_count);
@@ -2662,11 +2743,15 @@ void StartServoTask(void *argument)
     servo_state_t state = SERVO_INIT;
 
     uint32_t values[6][3] = {0};
-    float32_t angles[6][3] = {{ 0.0f }};
+    uint32_t written_goals[6][3] = {0};     // the goals of the last write
+    uint32_t profile_acceleration[6][3] = {0};
+    uint32_t profile_velocity[6][3] = {0};
     float32_t joint_angles[6][3] = {{ 0.0f }};
-    float32_t last_velocity[6][3] = {{0.0f }};
-    float32_t commanded_position[6][3] = {{0.0f}};
     float32_t target_joint_angles[6][3] = {{0.0f}};
+    float32_t target_duration_s = 0.0f;
+    uint32_t target_seq = 0;
+    uint32_t written_seq = 0;               // the targets last written to the servos
+    bool goals_written = false;             // that write succeeded
 
     int limit_alert = 0;
     bool request_powerdown = false;
@@ -2680,7 +2765,6 @@ void StartServoTask(void *argument)
     osEventFlagsWait(systemEventsHandle, EVT_UART_READY, osFlagsWaitAll, osWaitForever);
 
     uint32_t tick_count = osKernelGetTickCount();
-    uint32_t last_ticks = 0;
 
   /* Infinite loop */
   for(;;)
@@ -2732,16 +2816,17 @@ void StartServoTask(void *argument)
         }
         case SERVO_SYNC_TO_HW:
             // A) Convert the current targets to pulses
-            servo_copy_target_joint_angles(target_joint_angles, &servo_shared_state);
-            for (int i=0; i<6; i++) {
-                uncompensate(target_joint_angles[i], angles[i]);
-                values[i][0] = xl430_rad_centered_to_pulse(angles[i][0]);
-                values[i][1] = xl430_rad_centered_to_pulse(angles[i][1]);
-                values[i][2] = xl430_rad_centered_to_pulse(angles[i][2]);
-            }
+            servo_copy_target_command(target_joint_angles, &target_duration_s, &target_seq, &servo_shared_state);
+            servo_targets_to_goals(target_joint_angles, values);
 
-            // B) Write the goal position to the servos
-            if (servo_bus_write_goals(&values[0][0]) != DNM_OK) {
+            // B) Write the goal position and its profile to the servos
+            //    The fixed profile: there is no previous move to follow on
+            //    A failed write is repeated in SERVO_RUNNING
+            servo_fixed_profiles(profile_acceleration, profile_velocity);
+            goals_written = servo_bus_write_goals(values, profile_acceleration, profile_velocity) == DNM_OK;
+            memcpy(written_goals, values, sizeof(written_goals));
+            written_seq = target_seq;
+            if (!goals_written) {
                 LOG_ERROR("[ServoTask] Failed to write target servo positions");
             };
 
@@ -2751,7 +2836,7 @@ void StartServoTask(void *argument)
             break;
         case SERVO_RUNNING: {
             // Snapshot controller targets to avoid torn reads during updates
-            servo_copy_target_joint_angles(target_joint_angles, &servo_shared_state);
+            servo_copy_target_command(target_joint_angles, &target_duration_s, &target_seq, &servo_shared_state);
 
             // A) Read the actual positions from the servos
             //    - Convert pulses to rad
@@ -2767,6 +2852,7 @@ void StartServoTask(void *argument)
                 compensate(servo_angles_rad[i], joint_angles[i]);
             }
             servo_set_load_and_velocity(&servo_shared_state, servo_read.load, servo_read.velocity);
+            servo_set_profile_tracking(&servo_shared_state, servo_read.tracking_error, servo_read.profile_velocity);
 
             if (res != DNM_OK) {
                 LOG_WARN("[ServoTask] Failed to read all servos (error %d)%s", res,
@@ -2784,85 +2870,47 @@ void StartServoTask(void *argument)
                 // Damaged replies were read in full, the receiver is still in step
             };
 
-            // B) Interpolate toward target
-            //    - Apply deadband
-            //    - Error accumulation
-            //    - Step clamping on velocity
-            //.   - Limits check
-            uint32_t now = osKernelGetTickCount();
-            TickType_t dt_ticks = now - last_ticks;
-            last_ticks = now;
-            float32_t dt_s = (float32_t)dt_ticks * (float32_t)portTICK_PERIOD_MS * 1e-3f;
-            // Bounded around the 20ms SERVO_LOOP_INTERVAL: half-tick to double-tick.
-            // Revisit if the servoTask rate changes.
-            dt_s = clampf(dt_s, 0.01f, 0.04f);
-
-            float32_t max_step = SERVO_MAX_VELOCITY * dt_s;
-            for (int i=0; i<6; i++) {
-                for (int j=0; j<3; j++) {
-                    // Determine the remaining movement for this control step
-                    float32_t error = target_joint_angles[i][j] - joint_angles[i][j];
-
-                    // Step size with deadbanding and quantization
-                    float32_t step = 0.0f;
-                    if (fabsf(error) >= SERVO_DEADBAND_RAD) {
-                        step = clampf(error, -max_step, max_step);
-
-                        if (fabsf(step) < SERVO_MIN_STEP_RAD) {
-                            step = copysignf(SERVO_MIN_STEP_RAD, step);
-                        }
-                    }
-
-                    // Acceleration control
-                    float32_t desired_vel = clampf(
-                        step / dt_s,
-                        -SERVO_MAX_VELOCITY,
-                        +SERVO_MAX_VELOCITY
-                    );
-                    float32_t dv = desired_vel - last_velocity[i][j];
-
-                    dv = clampf(dv, -SERVO_MAX_ACCELERATION * dt_s, +SERVO_MAX_ACCELERATION * dt_s);
-
-                    float32_t vel = last_velocity[i][j] + dv;
-                    step = vel * dt_s;
-
-                    last_velocity[i][j] = vel;
-
-                    commanded_position[i][j] = joint_angles[i][j] + step;
-
-                    // Perform a limit check
-                    if (limit_alert_enabled) {
-                        if (commanded_position[i][j] < r.leg[i].limits[j][0] || commanded_position[i][j] > r.leg[i].limits[j][1]) {
-                            LOG_ERROR("Limit alert triggered, leg %d, axis %d", i, j);
-                            LOG_ERROR("Calculated value %5.2f, limits %5.2f, %5.2f", commanded_position[i][j], r.leg[i].limits[j][0], r.leg[i].limits[j][1]);
-                            limit_alert = 1;
+            // B) Write new targets, once per set the controller publishes
+            //    - Limits check
+            //    - Uncompensate angles, convert to pulses
+            //    - A profile per joint (or the fixed one), see SERVO_PROFILE_MODE
+            //    - Write the goals with their profile; the servos interpolate
+            //    A failed write is repeated on the next tick
+            if (target_seq != written_seq || !goals_written) {
+                for (int i=0; i<6; i++) {
+                    for (int j=0; j<3; j++) {
+                        if (limit_alert_enabled) {
+                            if (target_joint_angles[i][j] < r.leg[i].limits[j][0] || target_joint_angles[i][j] > r.leg[i].limits[j][1]) {
+                                LOG_ERROR("Limit alert triggered, leg %d, axis %d", i, j);
+                                LOG_ERROR("Calculated value %5.2f, limits %5.2f, %5.2f", target_joint_angles[i][j], r.leg[i].limits[j][0], r.leg[i].limits[j][1]);
+                                limit_alert = 1;
+                            }
                         }
                     }
                 }
+
+                if (limit_alert && limit_alert_enabled) {
+                    // TODO instead of error send a signal to the controller to recover
+                    state = SERVO_ERROR;
+                    break;
+                }
+
+                servo_targets_to_goals(target_joint_angles, values);
+#if SERVO_PROFILE_MODE == SERVO_PROFILE_MODE_COMPUTED
+                servo_computed_profiles(values, &servo_read, written_goals, target_duration_s,
+                                        profile_acceleration, profile_velocity);
+#else
+                servo_fixed_profiles(profile_acceleration, profile_velocity);
+#endif
+                goals_written = servo_bus_write_goals(values, profile_acceleration, profile_velocity) == DNM_OK;
+                memcpy(written_goals, values, sizeof(written_goals));
+                written_seq = target_seq;
+                if (!goals_written) {
+                    LOG_ERROR("[ServoTask] Failed to write target servo positions");
+                };
             }
 
-            if (limit_alert && limit_alert_enabled) {
-                // TODO instead of error send a signal to the controller to recover
-                state = SERVO_ERROR;
-                break;
-            }
-
-            // C) Write the goal position to the servos
-            //    - Uncompensate angles
-            //    - Convert to pulses
-            //    - Write to servos
-            for (int i=0; i<6; i++) {
-                uncompensate(commanded_position[i], angles[i]);
-                values[i][0] = xl430_rad_centered_to_pulse(angles[i][0]);
-                values[i][1] = xl430_rad_centered_to_pulse(angles[i][1]);
-                values[i][2] = xl430_rad_centered_to_pulse(angles[i][2]);
-            }
-
-            if (servo_bus_write_goals(&values[0][0]) != DNM_OK) {
-                LOG_ERROR("[ServoTask] Failed to write target servo positions");
-            };
-
-            // D) Write the actual readings into the shared state
+            // C) Write the actual readings into the shared state
             servo_set_actual_joint_angles(&servo_shared_state, joint_angles);
 
             break;

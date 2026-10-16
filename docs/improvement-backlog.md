@@ -76,6 +76,9 @@ and T7.12 is done, all verified on the robot (commits `2b0e064`, `d6c1be3`,
 `34e582f`). Updated 2026-10-13 (re-checked against the code, nothing else was
 implemented): T7.4 is done (units and the byte stuffing fix confirmed on the robot,
 the bench experiment used the same registers), T7.14 is done and T7.15 was added.
+Updated 2026-10-16: T4.1 is implemented (commit `cb73897`, not yet verified on the
+robot), which makes T2.4 moot. T4.2 is implemented too (commit `2fca015`, not yet
+verified on the robot).
 
 | Item | Phase | Status | Note |
 |------|:-----:|--------|------|
@@ -86,7 +89,7 @@ the bench experiment used the same registers), T7.14 is done and T7.15 was added
 | T2.12 | 1 | Open | No run-time stats, stack or heap reporting; mutex leak in gyro/accel tasks. |
 | T2.13 | 1 | Partial | Runs from the 16 MHz HSE with an HSI fallback (`2b0e064`); boots at 84 MHz. Open: power-cycle test, MCO measurement, load-cap decision (board has 15 pF caps, crystal wants 8 pF). |
 | T2.3 | 1 | Open | `wrap_to_pi` still `fmodf`-based (`[-π, π)`). |
-| T2.4 | 1 | Open | `last_ticks = 0` and `last_velocity` unchanged. Moot after T4.1. |
+| T2.4 | 1 | Moot | `last_velocity` and `last_ticks` deleted with the software interpolation (T4.1, `cb73897`). |
 | T2.5 | 1 | Open | `FEMUR_OFFSET_ANGLE_RAD` still in `servos.c`. |
 | T2.6 | 1 | Open | `initialized`, `delta_yaw`, `pending_yaw`, `CTRL_LOOP_DT_S`, `CTRL_SERVO_Z_OFFSET` still present. |
 | T2.9 | 1 | Open | Not re-verified; no related commits. |
@@ -94,11 +97,12 @@ the bench experiment used the same registers), T7.14 is done and T7.15 was added
 | T7.1 | 1 | Partial | New. Overruns are now counted (T7.12) and reported; re-anchoring `tick_count` is not done. |
 | T7.12 | 1 | Done | New. Servo bus diagnostics every 30 s (`34e582f`). |
 | T3.5 | 2 | Open | No related code. |
-| T4.1 | 2 | Open | No `PROFILE_VELOCITY` / `PROFILE_ACCELERATION` use in `Core/Src`. |
-| T4.2 | 2 | Open | Depends on T4.1. |
+| T4.1 | 2 | Partial | Implemented (`cb73897`): fixed profile with every goal, software interpolation removed. Not yet verified on the robot. |
+| T4.2 | 2 | Partial | Implemented (`2fca015`): v and a per joint per goal, measured from the servo's Position Trajectory, acceleration floor 40 rad/s². `SERVO_PROFILE_MODE` switches back to the fixed profile. Not yet verified on the robot; T factor and ramp not yet chosen from the E4 data. |
 | T7.2 | 2 | Open | New. |
 | T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
 | T7.4 | 2 | Done | New. Load, velocity and position come back in one 10-byte Sync Read and are published (`f1f0a2c`). Verified on the robot: values and timing as expected, units confirmed by the bench experiment, byte stuffing fixed (library `0a49c5c`, 0 failures in 2,950 reads). Left over: the rare read timeout (~1 per 3,000 cycles, first run) is not explained. |
+| T7.16 | 2 | Open | New, next after T4.1/T4.2 are seen on the robot. Write the goals when the controller publishes, not on the next 50 Hz servo tick. |
 | T7.15 | 2 | Open | New, from the first bench data. A loaded leg lags its servo profile by ~100 ms and stops short of the goal: tune the position controller. |
 | T7.14 | 2 | Done | New. Bench experiment for the servo profile mode: all 103 runs on the robot, 2026-10-12. Result in [plan §6.3](servo-profile-bench-experiment.md): velocity-based computed profile if profiles are used, no sync benefit, servo lag is the issue (T7.15). |
 | T7.13 | 2 | Open | New, low priority. Byte stuffing in the library costs ~0.12 ms per bus transaction in the Debug build; do it in one pass. |
@@ -468,6 +472,31 @@ The XL430 can do this in hardware via `PROFILE_VELOCITY` /
 task, deadband-quantization issues (§4.4 interaction review) go
 away.
 
+**Status:** **implemented (2026-10-16), not yet verified on the robot.** Commits
+`c93cd96` (units and packing in `Core/Src/servo_profile.c`, host test
+`tests/servo_profile_test.c`) and `cb73897` (servo task). What was built, against
+the plan below:
+- Every goal is written with its profile as one 12-byte Sync Write at address 108
+  (Profile Acceleration, Profile Velocity, Goal Position), not configured once in
+  `PERIF_Dynamixel_Configure`: the servos keep the profile registers over a board
+  reset (the bench once left values behind), so writing them with every goal means
+  no stale value is used.
+- The profile is fixed: `SERVO_PROFILE_VELOCITY` 4 rad/s and
+  `SERVO_PROFILE_ACCELERATION` 40 rad/s² (the old software limit). The conversions
+  never return 0 ("no limit" to the servo) and clamp at 4 rad/s and 150 rad/s²,
+  because the Velocity Limit register does not cap the profile.
+- Goals are written once per set of targets the controller publishes (10 Hz), not
+  every servo tick: the shared state carries a sequence number and the duration of
+  the targets (for T4.2). A failed write is repeated on the next servo tick. The
+  limit check runs on the targets.
+- The state Sync Read grows from 10 to 18 bytes (registers 126–143) and also returns
+  Velocity Trajectory and Position Trajectory. The tracking error (Position
+  Trajectory − Present Position) and the profile velocity are published in the
+  shared state (`servo_copy_profile_tracking()`), to record the servo lag for T7.15
+  and T7.6.
+- Bus time per second: the write goes from 0.8 ms at 50 Hz to about 1.5 ms at
+  10 Hz; the read grows by about 0.7 ms at 50 Hz (estimated, to be measured).
+
 **Do.** Add `xl430_radps_to_profile_velocity()` and
 `xl430_radps2_to_profile_acceleration()` helpers. Configure both
 registers in `PERIF_Dynamixel_Configure`. In `SERVO_RUNNING`,
@@ -526,7 +555,9 @@ makes `PERIF_Dynamixel_Init` halt) and step 3.
 **Status:** **done (2026-10-13).** Verified on the robot: the load, timing and byte
 stuffing checks below, and the units by the bench experiment (T7.14: velocity
 0.229 rpm per unit, position and velocity registers read consistently with the
-profile registers). Left over: the rare read timeouts, not explained. The servo task reads
+profile registers). Left over: the rare read timeouts, not explained. Since T4.1
+(`cb73897`) the read is 18 bytes, registers 126–143, adding Velocity Trajectory and
+Position Trajectory. Before that the servo task read
 registers 126–135 for every servo with `dynamixel_get_bytes_multiple` (10 bytes:
 load int16, velocity int32, position uint32) and publishes `load_pct[6][3]`
 (0.1 % units converted to %) and `velocity_radps[6][3]` in `servo_shared_state`
@@ -580,6 +611,35 @@ critical-section helpers. No behavior change yet.
 - *Bench:* servo loop period unchanged with the larger read.
 
 
+### T7.16 — Write the goals when the controller publishes
+
+**Source:** review of the task rates after T4.1/T4.2, 2026-10-16.
+**Effort:** S.
+**Depends on:** T4.1 and T4.2 verified on the robot first.
+
+**Why.** Since T4.1 the servos interpolate, and goals are written only when the
+controller publishes new targets (10 Hz). The 50 Hz servo loop now writes on one tick
+in five and otherwise only reads. A new target waits for the next servo tick: 0–20 ms,
+fixed but arbitrary because the two tasks keep their phase. The Position Trajectory
+that T4.2 measures Δ from is read on that tick, so it is up to 20 ms older than it could
+be. Meanwhile the 50 Hz reads cost about 20 % of the bus and are hardly used yet (a
+debug log of the load), but contact detection (T7.6) and odometry (T5.3) will need them.
+
+**Do.** The control task sets an event flag after `servo_set_target_joint_angles()`.
+The servo task waits for that flag or its 20 ms period, whichever comes first, and on
+the flag does read → profile → write at once. Keep the 50 Hz reads for sensing. Measure
+the time from publish to write with the DWT counter and add it to the bus diagnostics.
+
+**Verify.**
+- *Bench:* publish-to-write time about one read (~4 ms) instead of 0–20 ms; servo loop
+  overruns unchanged; bus utilisation unchanged.
+- *Walk:* no change in behaviour, or slightly less lag.
+
+**Later.** With the faster control rate of [design.md](design.md) §7.5 (25 Hz), run the controller and
+the servo cycle in lockstep at 25 Hz or more; the servo rate then becomes a sensing
+choice, not a motion one.
+
+
 ### T7.15 — Servo position controller tuning
 
 **Source:** first dry run of T7.14, 2026-10-12
@@ -598,19 +658,45 @@ lag on the loaded joints, and the walking controller works with positions that a
 by this much. The servos are also of two models (2XL430-W250 for coxa and femur, XL430
 for the tibia), which may need different settings.
 
+**What the manual says** ([XL430-W250](https://emanual.robotis.com/docs/en/dxl/x/xl430-w250/),
+[2XL430-W250](https://emanual.robotis.com/docs/en/dxl/x/2xl430-w250/)):
+- In Position Control Mode only the position P, I, D gains and the two feedforward gains are
+  used. The velocity P and I gains are used in Velocity Control Mode only, so they are left
+  out of the tuning.
+- The servo turns the goal into a trajectory with Profile Velocity and Acceleration, stores it
+  in Velocity and Position Trajectory, then applies feedforward and PID, with Goal PWM as the
+  limit. **Feedforward needs a profile:** with Profile Velocity 0 it has nothing to act on, so
+  the feedforward gains land together with T4.1.
+- The controller has an anti-windup gain, which the user cannot change.
+- The XL430 has no current-based position mode (velocity, position, extended position and PWM
+  only), so there is no goal current to limit the stiffness.
+- The specifications are at 11.1 V (stall 1.4 N·m, no load 57 rev/min, about 6.0 rad/s): the
+  5.9 rad/s measured at 11.0 V is the rated speed.
+- The two axes of a 2XL430 share one communication module.
+- A load near the maximum for some time sets the Overload error and switches the torque off;
+  only a reboot clears it.
+
 **Do.** The gains now (read by the bench identification): position P 640, I 0, D 2000
-(servos 16 and 17) or 3600 (servo 18); velocity P 100, I 1800 or 1000; feedforward 1st and
-2nd 0. On one leg, step the feedforward 1st gain first (it is the one meant to remove the
-lag of a velocity profile), then the position P and D gains, and measure the lag and the
-shortfall with the bench harness (T7.14), at the standing load. Settle on gains per joint, write them in
-`PERIF_Dynamixel_Configure`. A little integral action removes the shortfall but adds
-overshoot and windup when the leg is blocked, so decide with the data.
+(servos 16 and 17) or 3600 (servo 18); feedforward 1st and 2nd 0 (velocity P 100, I 1800 or
+1000, not used in position mode). On one leg, with the velocity-based computed profile:
+- Step the feedforward 1st gain first (it is the one meant to remove the lag of a velocity
+  profile), with more points between 100 and 300 (about 20–40 % of P), and expect different
+  values for the femur and the tibia: the right value depends on the load.
+- Then the position P and D gains (the tibia's higher D may be why it tracks best).
+- Measure the lag and the shortfall with the bench harness (T7.14), at the standing load.
+- For the shortfall that remains, prefer an offset of the goal by the measured load
+  (about 1.7 pulses per %) in the firmware to integral action. Integral action, or a stiffer
+  joint, adds overshoot and windup when the leg is blocked, and a stance leg that pushes for a
+  long time moves towards the Overload shutdown. Decide with the data.
+
+Settle on gains per joint and model, write them in `PERIF_Dynamixel_Configure` (they are RAM
+and lost at power off).
 
 **Verify.**
 - *Bench:* with the new gains the loaded femur is within a few pulses of its goal at rest
   and follows a 100 ms profile within a small lag.
-- *Walk:* no oscillation when standing and walking; the temperature of the servos stays
-  normal.
+- *Loaded and walk:* no oscillation when standing and walking; the temperature of the servos
+  stays normal; log the Hardware Error Status (overload, overheating) in these runs.
 
 **Interaction.** The position minus profile difference is proportional to the load, so it
 is a second indicator for contact detection (T7.6); changing the gains changes it.
@@ -706,15 +792,37 @@ joint-space interpolation chooses. Phase 2 scales
 `PROFILE_VELOCITY` per joint per tick so all joints in a leg
 finish together, preserving the planned trajectory.
 
-**Do.** Follow the implementation note step-by-step. Adds
-`target_joint_velocities[6][3]` to shared state; controller
-publishes them; servo task bulk-writes `PROFILE_VELOCITY` before
-`GOAL_POSITION` each tick.
+**Status:** **implemented (2026-10-16), not yet verified on the robot** (commit
+`2fca015`). As built, replacing the implementation note's steps:
+- The servo task, not the controller, computes the profile (`servo_computed_profiles()`
+  in `main.c`). Per joint, Δ = the new goal − the servo's **Position Trajectory**, read
+  in the same tick. Not the previous goal: with T longer than the period the profile
+  has not quite reached it, and a small next move measured from it would crawl over
+  the rest (25 mrad at 0.056 rad/s takes half a second). Not the measured position,
+  which lags the profile by 40–60 ms. A servo that did not answer the read falls back
+  to its previous goal.
+- T = `SERVO_PROFILE_T_FACTOR` (1.2) × the published `target_duration_s`, Tr =
+  `SERVO_PROFILE_TR_FRACTION` (0.25) × T, then `servo_profile_compute()`:
+  v = |Δ|/(T−Tr), a = v/Tr.
+- **Acceleration floor** `SERVO_PROFILE_MIN_ACCELERATION_RADPS2` (40 rad/s²): the
+  servo also brakes with Profile Acceleration. A tiny move after a fast one (the end
+  of a femur lift, the walk-to-stand transition) would otherwise give a ≈ 0 and the
+  joint would take seconds to stop and run far past the goal. The bench paths (ramp,
+  sine) change smoothly and do not show this; the gait's bursts do.
+- `SERVO_PROFILE_MODE` (`main.c`) selects `COMPUTED` (default) or `FIXED` (T4.1) to
+  compare on the robot. The first goals after a sync keep the fixed profile.
+- Left: choose the T factor from the E4 log per factor (0.8, 1.2, 1.5); the docs only
+  report the modes.
 
-**Verify.** Eight-step plan in the implementation note §8.
-Highlights:
-- *Bench:* single leg with large unequal joint deltas; confirm
-  joints arrive simultaneously.
+**Do (original).** Superseded by the status above.
+
+**Verify.** Eight-step plan in the implementation note §8, except the
+synchronisation, which the bench ruled out. Highlights:
+- *Bench:* replay realistic gait sequences (walk 50/100 mm/s, turn) with `FIXED`
+  and `COMPUTED`; the published profile velocity
+  (`servo_copy_profile_tracking()`) should stay steady through a tick instead of
+  peaking and falling to 0, with no run-on after a femur lift and no crawl into
+  standing.
 - *Walk:* high-speed walking; foot path should track the
   planned lift trapezoid closely (visible on a marked floor
   or via simulator overlay).

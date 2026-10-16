@@ -59,17 +59,6 @@ void uncompensate(const float32_t src[3], float32_t dst[3]) {
     dst[2] = src[2] - FEMUR_OFFSET_ANGLE_RAD;
 }
 
-void servo_copy_target_joint_angles(float32_t dst[6][3], const servo_shared_state_t *state)
-{
-    taskENTER_CRITICAL();
-    for (int i = 0; i < 6; i++) {
-        for (int j = 0; j < 3; j++) {
-            dst[i][j] = state->target_joint_angles[i][j];
-        }
-    }
-    taskEXIT_CRITICAL();
-}
-
 void servo_copy_actual_joint_angles(float32_t dst[6][3], const servo_shared_state_t *state)
 {
     taskENTER_CRITICAL();
@@ -81,7 +70,21 @@ void servo_copy_actual_joint_angles(float32_t dst[6][3], const servo_shared_stat
     taskEXIT_CRITICAL();
 }
 
-void servo_set_target_joint_angles(servo_shared_state_t *state, float32_t src[6][3])
+void servo_copy_target_command(float32_t dst[6][3], float32_t *duration_s, uint32_t *seq,
+                               const servo_shared_state_t *state)
+{
+    taskENTER_CRITICAL();
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < 3; j++) {
+            dst[i][j] = state->target_joint_angles[i][j];
+        }
+    }
+    *duration_s = state->target_duration_s;
+    *seq = state->target_seq;
+    taskEXIT_CRITICAL();
+}
+
+void servo_set_target_joint_angles(servo_shared_state_t *state, float32_t src[6][3], float32_t duration_s)
 {
     taskENTER_CRITICAL();
     for (int i = 0; i < 6; i++) {
@@ -89,6 +92,8 @@ void servo_set_target_joint_angles(servo_shared_state_t *state, float32_t src[6]
             state->target_joint_angles[i][j] = src[i][j];
         }
     }
+    state->target_duration_s = duration_s;
+    state->target_seq++;
     taskEXIT_CRITICAL();
 }
 
@@ -144,6 +149,30 @@ void servo_set_load_and_velocity(servo_shared_state_t *state, float32_t load[6][
         for (int j = 0; j < 3; j++) {
             state->load_pct[i][j] = load[i][j];
             state->velocity_radps[i][j] = velocity[i][j];
+        }
+    }
+    taskEXIT_CRITICAL();
+}
+
+void servo_copy_profile_tracking(float32_t error[6][3], float32_t velocity[6][3], const servo_shared_state_t *state)
+{
+    taskENTER_CRITICAL();
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < 3; j++) {
+            error[i][j] = state->tracking_error_rad[i][j];
+            velocity[i][j] = state->profile_velocity_radps[i][j];
+        }
+    }
+    taskEXIT_CRITICAL();
+}
+
+void servo_set_profile_tracking(servo_shared_state_t *state, float32_t error[6][3], float32_t velocity[6][3])
+{
+    taskENTER_CRITICAL();
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < 3; j++) {
+            state->tracking_error_rad[i][j] = error[i][j];
+            state->profile_velocity_radps[i][j] = velocity[i][j];
         }
     }
     taskEXIT_CRITICAL();

@@ -620,6 +620,10 @@ rate. Packet sizes at N = 18:
   8-byte contiguous Sync Write, only when a new control target is published
   (25 Hz), not every servo tick. (This also simplifies the two-write plan in
   `servo-velocity-control-phase2.md` §9 into one.)
+- As built (T4.1, 2026-10-16): the read is 18 bytes, 126–143, adding Velocity
+  Trajectory (136, 4 B) and Position Trajectory (140, 4 B) to see how far each
+  joint trails its profile. The write is 12 bytes at 108 (Profile Acceleration,
+  Profile Velocity, Goal Position) once per control target, at today's 10 Hz.
 
 ### A.3 Bus utilization
 
