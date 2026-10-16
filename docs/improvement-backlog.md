@@ -959,7 +959,7 @@ The Pi-facing protocol: one atomic command, CRC, status reply and link supervisi
   releasing it leaves a rotation to catch up. Bounding the heading lead to the actual yaw
   fixes it; bundle it with the next firmware change.
 
-Open: walking test with the bus diagnostics, the Poom firmware, the heading lead fix. Stop
+Open: the walking test with the bus diagnostics (saved, not yet run: [`link-walking-test.md`](link-walking-test.md)), the Poom firmware, the heading lead fix. Stop
 the `poom-remote` service when flashing, the bootloader shares the SPI bus.
 
 **Do.**
