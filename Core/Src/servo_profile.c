@@ -56,8 +56,12 @@ void servo_profile_compute(const float32_t delta_rad, const float32_t time_s, fl
         /* Keep the ramp time: the move takes longer than time_s */
         v = SERVO_PROFILE_MAX_VELOCITY_RADPS;
     }
+    float32_t a = v / ramp_s;
+    if (a < SERVO_PROFILE_MIN_ACCELERATION_RADPS2) {
+        a = SERVO_PROFILE_MIN_ACCELERATION_RADPS2;
+    }
     *velocity = xl430_radps_to_profile_velocity(v);
-    *acceleration = xl430_radps2_to_profile_acceleration(v / ramp_s);
+    *acceleration = xl430_radps2_to_profile_acceleration(a);
 }
 
 static void put_u32(uint8_t *p, const uint32_t value)

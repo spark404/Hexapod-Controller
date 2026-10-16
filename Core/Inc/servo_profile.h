@@ -37,6 +37,14 @@
 #define SERVO_PROFILE_MAX_ACCELERATION_RADPS2 150.0f
 
 /*
+ * Lower limit of a computed acceleration. The servo also brakes with Profile
+ * Acceleration: a tiny move after a fast one would otherwise give an
+ * acceleration of almost nothing, and the joint would take seconds to stop
+ * and run far past its goal (from 1.6 rad/s at 0.4 rad/s^2: 4 s, 3 rad).
+ */
+#define SERVO_PROFILE_MIN_ACCELERATION_RADPS2 40.0f
+
+/*
  * Profile Velocity in 0.229 rev/min units, at least 1: 0 means "no limit" to
  * the servo, a jump to the goal. Clamped to SERVO_PROFILE_MAX_VELOCITY_RADPS.
  */
@@ -52,7 +60,8 @@ uint32_t xl430_radps2_to_profile_acceleration(float32_t radps2);
  * Profile that moves delta_rad in time_s with ramps of ramp_s at both ends:
  * v = |delta| / (time - ramp), a = v / ramp. A trapezoid with ramps of
  * ramp_s covers v * (time - ramp). ramp_s is limited to half of time_s.
- * The results are clamped as by the conversions above.
+ * a is at least SERVO_PROFILE_MIN_ACCELERATION_RADPS2, and the results are
+ * clamped as by the conversions above.
  */
 void servo_profile_compute(float32_t delta_rad, float32_t time_s, float32_t ramp_s,
                            uint32_t *velocity, uint32_t *acceleration);

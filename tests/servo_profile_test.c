@@ -61,14 +61,21 @@ static void test_compute(void)
     servo_profile_compute(-0.15f, 0.1f, 0.02f, &v2, &a2);
     assert(v2 == v && a2 == a);
 
-    /* A tiny move still has a profile */
+    /* A tiny move still has a profile, and brakes at no less than the floor */
+    const uint32_t a_min = xl430_radps2_to_profile_acceleration(SERVO_PROFILE_MIN_ACCELERATION_RADPS2);
+    assert(a_min == 107);   /* 40 rad/s^2 */
     servo_profile_compute(0.002f, 0.1f, 0.025f, &v, &a);
     assert(v == 1);
-    assert(a >= 1);
+    assert(a == a_min);
 
-    /* No move: the slowest profile, not a jump */
+    /* No move: the slowest velocity, not a jump, and the braking floor */
     servo_profile_compute(0.0f, 0.1f, 0.025f, &v, &a);
-    assert(v == 1 && a == 1);
+    assert(v == 1 && a == a_min);
+
+    /* The step after a femur lift: a small move must not brake slowly */
+    servo_profile_compute(0.005f, 0.12f, 0.03f, &v, &a);
+    assert(v == 2);         /* 0.056 rad/s */
+    assert(a == a_min);
 
     /* Too fast: velocity clamped, the ramp time kept */
     servo_profile_compute(1.0f, 0.1f, 0.025f, &v, &a);
