@@ -598,19 +598,45 @@ lag on the loaded joints, and the walking controller works with positions that a
 by this much. The servos are also of two models (2XL430-W250 for coxa and femur, XL430
 for the tibia), which may need different settings.
 
+**What the manual says** ([XL430-W250](https://emanual.robotis.com/docs/en/dxl/x/xl430-w250/),
+[2XL430-W250](https://emanual.robotis.com/docs/en/dxl/x/2xl430-w250/)):
+- In Position Control Mode only the position P, I, D gains and the two feedforward gains are
+  used. The velocity P and I gains are used in Velocity Control Mode only, so they are left
+  out of the tuning.
+- The servo turns the goal into a trajectory with Profile Velocity and Acceleration, stores it
+  in Velocity and Position Trajectory, then applies feedforward and PID, with Goal PWM as the
+  limit. **Feedforward needs a profile:** with Profile Velocity 0 it has nothing to act on, so
+  the feedforward gains land together with T4.1.
+- The controller has an anti-windup gain, which the user cannot change.
+- The XL430 has no current-based position mode (velocity, position, extended position and PWM
+  only), so there is no goal current to limit the stiffness.
+- The specifications are at 11.1 V (stall 1.4 N·m, no load 57 rev/min, about 6.0 rad/s): the
+  5.9 rad/s measured at 11.0 V is the rated speed.
+- The two axes of a 2XL430 share one communication module.
+- A load near the maximum for some time sets the Overload error and switches the torque off;
+  only a reboot clears it.
+
 **Do.** The gains now (read by the bench identification): position P 640, I 0, D 2000
-(servos 16 and 17) or 3600 (servo 18); velocity P 100, I 1800 or 1000; feedforward 1st and
-2nd 0. On one leg, step the feedforward 1st gain first (it is the one meant to remove the
-lag of a velocity profile), then the position P and D gains, and measure the lag and the
-shortfall with the bench harness (T7.14), at the standing load. Settle on gains per joint, write them in
-`PERIF_Dynamixel_Configure`. A little integral action removes the shortfall but adds
-overshoot and windup when the leg is blocked, so decide with the data.
+(servos 16 and 17) or 3600 (servo 18); feedforward 1st and 2nd 0 (velocity P 100, I 1800 or
+1000, not used in position mode). On one leg, with the velocity-based computed profile:
+- Step the feedforward 1st gain first (it is the one meant to remove the lag of a velocity
+  profile), with more points between 100 and 300 (about 20–40 % of P), and expect different
+  values for the femur and the tibia: the right value depends on the load.
+- Then the position P and D gains (the tibia's higher D may be why it tracks best).
+- Measure the lag and the shortfall with the bench harness (T7.14), at the standing load.
+- For the shortfall that remains, prefer an offset of the goal by the measured load
+  (about 1.7 pulses per %) in the firmware to integral action. Integral action, or a stiffer
+  joint, adds overshoot and windup when the leg is blocked, and a stance leg that pushes for a
+  long time moves towards the Overload shutdown. Decide with the data.
+
+Settle on gains per joint and model, write them in `PERIF_Dynamixel_Configure` (they are RAM
+and lost at power off).
 
 **Verify.**
 - *Bench:* with the new gains the loaded femur is within a few pulses of its goal at rest
   and follows a 100 ms profile within a small lag.
-- *Walk:* no oscillation when standing and walking; the temperature of the servos stays
-  normal.
+- *Loaded and walk:* no oscillation when standing and walking; the temperature of the servos
+  stays normal; log the Hardware Error Status (overload, overheating) in these runs.
 
 **Interaction.** The position minus profile difference is proportional to the load, so it
 is a second indicator for contact detection (T7.6); changing the gains changes it.
