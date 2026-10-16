@@ -71,6 +71,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         # Add user sources here
         Core/Src/calculator.c
         Core/Src/servos.c
+        Core/Src/servo_profile.c
         Core/Src/rgb_led.c
         Core/Src/controller.c
         Core/Src/measure.c
