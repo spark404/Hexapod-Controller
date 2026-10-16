@@ -102,6 +102,7 @@ verified on the robot).
 | T7.2 | 2 | Open | New. |
 | T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
 | T7.4 | 2 | Done | New. Load, velocity and position come back in one 10-byte Sync Read and are published (`f1f0a2c`). Verified on the robot: values and timing as expected, units confirmed by the bench experiment, byte stuffing fixed (library `0a49c5c`, 0 failures in 2,950 reads). Left over: the rare read timeout (~1 per 3,000 cycles, first run) is not explained. |
+| T7.16 | 2 | Open | New, next after T4.1/T4.2 are seen on the robot. Write the goals when the controller publishes, not on the next 50 Hz servo tick. |
 | T7.15 | 2 | Open | New, from the first bench data. A loaded leg lags its servo profile by ~100 ms and stops short of the goal: tune the position controller. |
 | T7.14 | 2 | Done | New. Bench experiment for the servo profile mode: all 103 runs on the robot, 2026-10-12. Result in [plan §6.3](servo-profile-bench-experiment.md): velocity-based computed profile if profiles are used, no sync benefit, servo lag is the issue (T7.15). |
 | T7.13 | 2 | Open | New, low priority. Byte stuffing in the library costs ~0.12 ms per bus transaction in the Debug build; do it in one pass. |
@@ -608,6 +609,35 @@ critical-section helpers. No behavior change yet.
 - *Bench:* log femur and tibia load with the robot standing and with a leg
   lifted; the loaded leg should show a clear difference.
 - *Bench:* servo loop period unchanged with the larger read.
+
+
+### T7.16 — Write the goals when the controller publishes
+
+**Source:** review of the task rates after T4.1/T4.2, 2026-10-16.
+**Effort:** S.
+**Depends on:** T4.1 and T4.2 verified on the robot first.
+
+**Why.** Since T4.1 the servos interpolate, and goals are written only when the
+controller publishes new targets (10 Hz). The 50 Hz servo loop now writes on one tick
+in five and otherwise only reads. A new target waits for the next servo tick: 0–20 ms,
+fixed but arbitrary because the two tasks keep their phase. The Position Trajectory
+that T4.2 measures Δ from is read on that tick, so it is up to 20 ms older than it could
+be. Meanwhile the 50 Hz reads cost about 20 % of the bus and are hardly used yet (a
+debug log of the load), but contact detection (T7.6) and odometry (T5.3) will need them.
+
+**Do.** The control task sets an event flag after `servo_set_target_joint_angles()`.
+The servo task waits for that flag or its 20 ms period, whichever comes first, and on
+the flag does read → profile → write at once. Keep the 50 Hz reads for sensing. Measure
+the time from publish to write with the DWT counter and add it to the bus diagnostics.
+
+**Verify.**
+- *Bench:* publish-to-write time about one read (~4 ms) instead of 0–20 ms; servo loop
+  overruns unchanged; bus utilisation unchanged.
+- *Walk:* no change in behaviour, or slightly less lag.
+
+**Later.** With the redesign's faster control rate (R12/R13), run the controller and
+the servo cycle in lockstep at 25 Hz or more; the servo rate then becomes a sensing
+choice, not a motion one.
 
 
 ### T7.15 — Servo position controller tuning
