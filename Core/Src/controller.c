@@ -278,19 +278,12 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
         }
 
         if (!has_valid_data) {
-            LOG_DEBUG("SYNC: Waiting for valid joint data...");
             return; // Stay in SYNCING until we get real data
         }
 
         for (int i = 0; i < 6; i++) {
             arm_vec_copy_f32(ctx->robot.leg_state[i].actual_joint_angles,
                              ctx->robot.leg_state[i].next_joint_angles, 3);
-            if (i == 0) {
-                LOG_DEBUG("SYNC Leg 0 angles: %.3f, %.3f, %.3f",
-                    ctx->robot.leg_state[i].actual_joint_angles[0],
-                    ctx->robot.leg_state[i].actual_joint_angles[1],
-                    ctx->robot.leg_state[i].actual_joint_angles[2]);
-            }
         }
         ctx->next_state = CTRL_STANDUP;
     } else if (ctx->state == CTRL_STANDUP) {
@@ -333,16 +326,6 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
             if (distance_remaining > CTRL_CLOSE_THRESH) {
                 ready = 0;
             };
-
-            if (i==0) {
-                LOG_DEBUG("C: %.3f, %.3f, %.3f; T: %.3f, %.3f, %.3f",
-                    p_current_in_body_frame[0], p_current_in_body_frame[1], p_current_in_body_frame[2],
-                    p_target_in_body_frame[0], p_target_in_body_frame[1], p_target_in_body_frame[2]);
-                LOG_DEBUG("A: %.3f, %.3f, %.3f; N: %.3f, %.3f, %.3f; T: %.3f, %.3f, %.3f",
-                    current_leg_state->actual_joint_angles[0], current_leg_state->actual_joint_angles[1], current_leg_state->actual_joint_angles[2],
-                    current_leg_state->next_joint_angles[0], current_leg_state->next_joint_angles[1], current_leg_state->next_joint_angles[2],
-                    target_joint_angles[0], target_joint_angles[1], target_joint_angles[2]);
-            }
         }
 
         if (ready) {
@@ -501,7 +484,6 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
             }
         }
 
-        float32_t longest_grounded_path = longest_path;
         longest_path = fminf(longest_path, longest_lifted_path);
 
         // Some form of clamping?
@@ -582,21 +564,8 @@ void controller_update(controller_ctx_t *ctx, const controller_attitude_t *attit
 
             float32_t origin3[3] = {0, 0, 0};
             inverse_kinematics(origin3, p_next_coxa, leg->next_joint_angles);
-
-            LOG_DEBUG("[L%d %s] plen=%5.2f step=%5.2f dist=%5.2f act=%5.2f,%5.2f,%5.2f nxt=%5.2f,%5.2f,%5.2f",
-                i, leg->grounded ? "G" : "L",
-                path_length, step_length, leg_dist_to_target,
-                leg->actual_joint_angles[0], leg->actual_joint_angles[1], leg->actual_joint_angles[2],
-                leg->next_joint_angles[0], leg->next_joint_angles[1], leg->next_joint_angles[2]);
         }
 
-        float32_t walk_eff_v = fmaxf(
-            arm_vec_magnitude_f32(movement_vector, 3) + fabsf(rotation_step) * max_r,
-            1e-3f);
-        LOG_DEBUG("[WALK] longest=%5.2f (grnd=%5.2f lift=%5.2f) eff_v=%5.3f subs=%5.2f rem=%5.2f",
-            longest_path, longest_grounded_path, longest_lifted_path,
-            walk_eff_v, fmaxf(longest_path / walk_eff_v, 1.0f),
-            remaining_path_length);
         if (remaining_path_length < CTRL_CLOSE_THRESH) {
             swap_legs(ctx);
         }
