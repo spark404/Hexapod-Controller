@@ -14,4 +14,7 @@ Flow: design intent (`control-model`) → as built (`controller-overview`) →
 what is wrong (`controller-audit`) → what to do about it (`improvement-backlog`,
 with `servo-velocity-control-phase2` as the detailed spec for T4.1 and T4.2).
 
+Superseded documents from May and July 2026 are in [`archive/`](archive/README.md);
+their R and D numbers are a different scheme from `design.md`.
+
 Helper scripts live in [`../tools/`](../tools/).

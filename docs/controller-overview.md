@@ -198,7 +198,9 @@ Thexapod_body = Thexapod · Tbody                              // world ← body
 
 User commands map to:
 
-- `velocity` — forward speed in mm/s, signed (negative = walk backward).
+- `velocity` — forward speed in mm/s. The math is sign-agnostic, but the SPI
+  command handler rejects values outside 0–100 (`main.c`), so walking backward is
+  not reachable in practice.
 - `heading` — desired absolute yaw in world frame; `yaw_error = wrap_to_pi(heading − yaw)`.
 - `height` — desired body Z. Only mirrored into `robot.body.translation[2]`
   while in `STANDING` or `WALKING`.
