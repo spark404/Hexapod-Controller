@@ -76,6 +76,8 @@ and T7.12 is done, all verified on the robot (commits `2b0e064`, `d6c1be3`,
 `34e582f`). Updated 2026-10-13 (re-checked against the code, nothing else was
 implemented): T7.4 is done (units and the byte stuffing fix confirmed on the robot,
 the bench experiment used the same registers), T7.14 is done and T7.15 was added.
+Updated 2026-10-16: T4.1 is implemented (commit `cb73897`, not yet verified on the
+robot), which makes T2.4 moot; the plumbing for T4.2 is in place.
 
 | Item | Phase | Status | Note |
 |------|:-----:|--------|------|
@@ -86,7 +88,7 @@ the bench experiment used the same registers), T7.14 is done and T7.15 was added
 | T2.12 | 1 | Open | No run-time stats, stack or heap reporting; mutex leak in gyro/accel tasks. |
 | T2.13 | 1 | Partial | Runs from the 16 MHz HSE with an HSI fallback (`2b0e064`); boots at 84 MHz. Open: power-cycle test, MCO measurement, load-cap decision (board has 15 pF caps, crystal wants 8 pF). |
 | T2.3 | 1 | Open | `wrap_to_pi` still `fmodf`-based (`[-π, π)`). |
-| T2.4 | 1 | Open | `last_ticks = 0` and `last_velocity` unchanged. Moot after T4.1. |
+| T2.4 | 1 | Moot | `last_velocity` and `last_ticks` deleted with the software interpolation (T4.1, `cb73897`). |
 | T2.5 | 1 | Open | `FEMUR_OFFSET_ANGLE_RAD` still in `servos.c`. |
 | T2.6 | 1 | Open | `initialized`, `delta_yaw`, `pending_yaw`, `CTRL_LOOP_DT_S`, `CTRL_SERVO_Z_OFFSET` still present. |
 | T2.9 | 1 | Open | Not re-verified; no related commits. |
@@ -94,8 +96,8 @@ the bench experiment used the same registers), T7.14 is done and T7.15 was added
 | T7.1 | 1 | Partial | New. Overruns are now counted (T7.12) and reported; re-anchoring `tick_count` is not done. |
 | T7.12 | 1 | Done | New. Servo bus diagnostics every 30 s (`34e582f`). |
 | T3.5 | 2 | Open | No related code. |
-| T4.1 | 2 | Open | No `PROFILE_VELOCITY` / `PROFILE_ACCELERATION` use in `Core/Src`. |
-| T4.2 | 2 | Open | Depends on T4.1. |
+| T4.1 | 2 | Partial | Implemented (`cb73897`): fixed profile with every goal, software interpolation removed. Not yet verified on the robot. |
+| T4.2 | 2 | Open | Plumbing in place (`c93cd96`, `cb73897`): `servo_profile_compute()`, target sequence and duration in the shared state, 12-byte write. Left: compute v and a per joint in the write. |
 | T7.2 | 2 | Open | New. |
 | T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
 | T7.4 | 2 | Done | New. Load, velocity and position come back in one 10-byte Sync Read and are published (`f1f0a2c`). Verified on the robot: values and timing as expected, units confirmed by the bench experiment, byte stuffing fixed (library `0a49c5c`, 0 failures in 2,950 reads). Left over: the rare read timeout (~1 per 3,000 cycles, first run) is not explained. |
@@ -468,6 +470,31 @@ The XL430 can do this in hardware via `PROFILE_VELOCITY` /
 task, deadband-quantization issues (§4.4 interaction review) go
 away.
 
+**Status:** **implemented (2026-10-16), not yet verified on the robot.** Commits
+`c93cd96` (units and packing in `Core/Src/servo_profile.c`, host test
+`tests/servo_profile_test.c`) and `cb73897` (servo task). What was built, against
+the plan below:
+- Every goal is written with its profile as one 12-byte Sync Write at address 108
+  (Profile Acceleration, Profile Velocity, Goal Position), not configured once in
+  `PERIF_Dynamixel_Configure`: the servos keep the profile registers over a board
+  reset (the bench once left values behind), so writing them with every goal means
+  no stale value is used.
+- The profile is fixed: `SERVO_PROFILE_VELOCITY` 4 rad/s and
+  `SERVO_PROFILE_ACCELERATION` 40 rad/s² (the old software limit). The conversions
+  never return 0 ("no limit" to the servo) and clamp at 4 rad/s and 150 rad/s²,
+  because the Velocity Limit register does not cap the profile.
+- Goals are written once per set of targets the controller publishes (10 Hz), not
+  every servo tick: the shared state carries a sequence number and the duration of
+  the targets (for T4.2). A failed write is repeated on the next servo tick. The
+  limit check runs on the targets.
+- The state Sync Read grows from 10 to 18 bytes (registers 126–143) and also returns
+  Velocity Trajectory and Position Trajectory. The tracking error (Position
+  Trajectory − Present Position) and the profile velocity are published in the
+  shared state (`servo_copy_profile_tracking()`), to record the servo lag for T7.15
+  and T7.6.
+- Bus time per second: the write goes from 0.8 ms at 50 Hz to about 1.5 ms at
+  10 Hz; the read grows by about 0.7 ms at 50 Hz (estimated, to be measured).
+
 **Do.** Add `xl430_radps_to_profile_velocity()` and
 `xl430_radps2_to_profile_acceleration()` helpers. Configure both
 registers in `PERIF_Dynamixel_Configure`. In `SERVO_RUNNING`,
@@ -526,7 +553,9 @@ makes `PERIF_Dynamixel_Init` halt) and step 3.
 **Status:** **done (2026-10-13).** Verified on the robot: the load, timing and byte
 stuffing checks below, and the units by the bench experiment (T7.14: velocity
 0.229 rpm per unit, position and velocity registers read consistently with the
-profile registers). Left over: the rare read timeouts, not explained. The servo task reads
+profile registers). Left over: the rare read timeouts, not explained. Since T4.1
+(`cb73897`) the read is 18 bytes, registers 126–143, adding Velocity Trajectory and
+Position Trajectory. Before that the servo task read
 registers 126–135 for every servo with `dynamixel_get_bytes_multiple` (10 bytes:
 load int16, velocity int32, position uint32) and publishes `load_pct[6][3]`
 (0.1 % units converted to %) and `velocity_radps[6][3]` in `servo_shared_state`
@@ -732,10 +761,13 @@ joint-space interpolation chooses. Phase 2 scales
 `PROFILE_VELOCITY` per joint per tick so all joints in a leg
 finish together, preserving the planned trajectory.
 
-**Do.** Follow the implementation note step-by-step. Adds
-`target_joint_velocities[6][3]` to shared state; controller
-publishes them; servo task bulk-writes `PROFILE_VELOCITY` before
-`GOAL_POSITION` each tick.
+**Do.** Superseded in part by what T4.1 built: the servo task, not the controller,
+computes the profile. Per joint, Δ = the new goal − the previous written goal (not the
+measured position, which lags), T = factor × the published `target_duration_s` and
+Tr = fraction × T, then `servo_profile_compute()` gives v and a for the 12-byte write.
+Start with factor 1.2 and fraction 0.25 (the middle of what E4 tested and the bench's
+ramp); re-analyse the E4 log per T factor before fixing them. Keep the fixed profile
+behind a compile-time switch to compare.
 
 **Verify.** Eight-step plan in the implementation note §8.
 Highlights:
