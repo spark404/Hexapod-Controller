@@ -85,7 +85,8 @@ consolidated); T2.12 has a compact stack report; T4.1 and T4.2 ran on the robot 
 link tests (stand-up and short walks, no bus write failures; the quality of the motion is
 not assessed yet). The frames of the controller are analysed in
 [`frames-analysis.md`](frames-analysis.md) (T5.2, T7.8). The ROTATING state of the controller
-raised a fatal joint limit alert on the robot (see T7.5 and T7.8).
+raised a fatal joint limit alert on the robot (see T7.5 and T7.8). The RGB LED task had never
+been created (FreeRTOS heap full) and its blink never worked; both are fixed, see T2.12.
 
 | Item | Phase | Status | Note |
 |------|:-----:|--------|------|
@@ -193,8 +194,12 @@ Independent of the new design and a prerequisite for most of it. Do these first,
 **Effort:** S.
 **Status:** **partly done (2026-10-16).** The stack usage of all tasks is reported as one line
 every 5 minutes (`[Stack] free/total bytes: ...`), as a warning with the tasks marked `!` when
-one has under 20 % free (`9f97ea9`). Run-time stats and CPU %, the heap, the cycle counter
-around `controller_update` and the mutex leak are still open.
+one has under 20 % free (`9f97ea9`), followed by a `[Heap]` line with the free and the lowest
+ever free FreeRTOS heap (a warning under 4 KB), and `rtos_check_created()` logs every task,
+queue or mutex that could not be created. The heap was the reason the LED task was never
+created: 40,960 bytes left 128 after the servo task, the LED thread needed 624; it is 64,000
+now. Run-time stats and CPU %, the cycle counter around `controller_update` and the mutex leak
+are still open.
 
 **Do.** Enable FreeRTOS run-time stats with the DWT cycle counter as the timer;
 log per-task CPU %, `uxTaskGetStackHighWaterMark` per task and

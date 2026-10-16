@@ -124,6 +124,7 @@ MATRIX(M, 4)
 #define LOAD_REPORT_PERIOD_S 5      // debug level only
 #define STACK_REPORT_PERIOD_S 300
 #define STACK_LOW_PERCENT 20        // a task with less stack than this free is reported as a warning
+#define HEAP_LOW_BYTES 4096         // the lowest the FreeRTOS heap has been, below this it is a warning
 #define CONTROL_LOOP_INTERVAL HZ_TO_INTERVAL(10)
 #define SERVO_LOOP_INTERVAL HZ_TO_INTERVAL(50)
 #define MAG_LOOP_INTERVAL HZ_TO_INTERVAL(5)
@@ -391,6 +392,7 @@ static void report_bus(void);
 static void report_sensors(void);
 static void report_load(void);
 static void report_stacks(void);
+static void rtos_check_created(void);
 static int clock_hse_fallback(void);
 int __io_putchar(int ch);
 
@@ -616,6 +618,7 @@ int main(void)
 
   /* USER CODE BEGIN RTOS_EVENTS */
     /* add events, ... */
+    rtos_check_created();
   /* USER CODE END RTOS_EVENTS */
 
   /* Start scheduler */
@@ -1177,6 +1180,43 @@ static void report_stacks(void)
         LOG_WARN("[Stack] free/total bytes, ! = under %d%% free: %s", STACK_LOW_PERCENT, line);
     } else {
         LOG_INFO("[Stack] free/total bytes: %s", line);
+    }
+
+    // Every task stack and RTOS object comes from the FreeRTOS heap; creating one fails quietly
+    // when it runs out (the LED task was never created for that reason)
+    const size_t heap_free = xPortGetFreeHeapSize();
+    const size_t heap_low = xPortGetMinimumEverFreeHeapSize();
+    if (heap_low < HEAP_LOW_BYTES) {
+        LOG_WARN("[Heap] free %lu B, lowest ever %lu B of %lu B: running low",
+                 (unsigned long) heap_free, (unsigned long) heap_low, (unsigned long) configTOTAL_HEAP_SIZE);
+    } else {
+        LOG_INFO("[Heap] free %lu B, lowest ever %lu B of %lu B",
+                 (unsigned long) heap_free, (unsigned long) heap_low, (unsigned long) configTOTAL_HEAP_SIZE);
+    }
+}
+
+// An RTOS object that could not be created is a NULL handle and nothing else: no error, no log.
+// Called once everything has been created.
+static void rtos_check_created(void)
+{
+    const struct {
+        const char *name;
+        const void *handle;
+    } objects[] = {
+        {"spiMutex", spiMutexHandle}, {"usartMutex", usartMutexHandle}, {"uart_dma_mutex", uart_dma_mutexHandle},
+        {"usart_rx_sem", usart_rx_semHandle}, {"usart_tx_sem", usart_tx_semHandle},
+        {"ekf_queue", ekf_queueHandle}, {"usart_tx_queue", usart_tx_queueHandle}, {"rgb_led_queue", rgb_led_queueHandle},
+        {"defaultTask", defaultTaskHandle}, {"spiSlaveTask", spiSlaveTaskHandle}, {"gyroTask", gyroTaskHandle},
+        {"accelTask", accelTaskHandle}, {"magTask", magTaskHandle}, {"ekfTask", ekfTaskHandle},
+        {"usartRxTask", usartRxTaskHandle}, {"usartTxTask", usartTxTaskHandle}, {"controlTask", controlTaskHandle},
+        {"servoTask", servoTaskHandle}, {"rgbLedTask", rgbLedTaskHandle}, {"systemEvents", systemEventsHandle},
+    };
+
+    for (size_t i = 0; i < sizeof(objects) / sizeof(objects[0]); i++) {
+        if (objects[i].handle == NULL) {
+            LOG_ERROR("[RTOS] %s was not created: FreeRTOS heap too small (free %lu B)", objects[i].name,
+                      (unsigned long) xPortGetFreeHeapSize());
+        }
     }
 }
 /**
@@ -3079,9 +3119,9 @@ void Error_Handler(void)
     __disable_irq();
     log_sink_uart_panic();   // queued log output has to go out by polling from here
 
-    /* Set indicator LED to red */
+    /* Set indicator LED to red (active low: only the red pin is driven low) */
     HAL_GPIO_WritePin(ST_LED_R_GPIO_Port, ST_LED_R_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(ST_LED_G_GPIO_Port, ST_LED_G_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(ST_LED_B_GPIO_Port, ST_LED_B_Pin, GPIO_PIN_SET);
 
     printf("\r\n\r\n=== FATAL ERROR ===\r\n");

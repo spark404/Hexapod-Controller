@@ -73,6 +73,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         Core/Src/servos.c
         Core/Src/servo_profile.c
         Core/Src/rgb_led.c
+        Core/Src/rgb_led_core.c
         Core/Src/controller.c
         Core/Src/measure.c
         Core/Src/attitude_measurement.c

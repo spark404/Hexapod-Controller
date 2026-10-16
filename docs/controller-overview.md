@@ -502,6 +502,22 @@ folds them into its FSM. Note this is a *request*: the servo task chooses
 when to act on it (e.g. it will not honor a powerdown while still in
 `SERVO_INIT`).
 
+**The RGB LED.** Three colours show where the firmware is:
+
+| When | LED | Written by |
+|------|-----|-----------|
+| peripheral initialisation | blue | `main()`, directly |
+| initialisation complete (until the first state change) | green | `main()`, directly |
+| a controller state | the colours above, blinking 500 ms at 50 % | the LED task (`rgb_led.c`) from the commands the callback queues |
+| fatal error (`Error_Handler`, hard fault) | red | the handler, directly, with interrupts off |
+
+The LED task sleeps on its command queue with a timeout equal to the time until the next blink
+phase, applies every command that is waiting and shows the result; the timing is in
+`rgb_led_core.c` (host test `tests/rgb_led_core_test.c`). The task is created with the others in
+`MX_FREERTOS_Init`; if the FreeRTOS heap is too small the creation fails without any message
+(this kept the LED green for months), so `rtos_check_created()` logs every object that is
+missing and the periodic `[Heap]` line reports the lowest free heap.
+
 ### 6.6 End-to-end timing
 
 ```plantuml
