@@ -635,7 +635,7 @@ the time from publish to write with the DWT counter and add it to the bus diagno
   overruns unchanged; bus utilisation unchanged.
 - *Walk:* no change in behaviour, or slightly less lag.
 
-**Later.** With the redesign's faster control rate (R12/R13), run the controller and
+**Later.** With the faster control rate of [design.md](design.md) §7.5 (25 Hz), run the controller and
 the servo cycle in lockstep at 25 Hz or more; the servo rate then becomes a sensing
 choice, not a motion one.
 
