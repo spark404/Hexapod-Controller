@@ -40,6 +40,7 @@
 #include "ring_buffer.h"
 #include "log_sink_port.h"
 #include "cmd_link.h"
+#include "periodic.h"
 #include "command_adapter.h"
 
 #include "dynamixel/dynamixel.h"
@@ -115,7 +116,14 @@ MATRIX(M, 4)
 
 #define HZ_TO_INTERVAL(hz) (1000 / (uint32_t)(hz))
 #define MAIN_LOOP_INTERVAL HZ_TO_INTERVAL(1)
-#define BUS_DIAG_REPORT_S 30  // MAIN_LOOP_INTERVAL ticks per report, see StartDefaultTask
+
+// Periodic reports of the default task. Reports with the same start and a period that is a
+// multiple of another one fall together: the status block (servo bus, sensors) every
+// STATUS_REPORT_PERIOD_S, the stack usage with every tenth block.
+#define STATUS_REPORT_PERIOD_S 30
+#define LOAD_REPORT_PERIOD_S 5      // debug level only
+#define STACK_REPORT_PERIOD_S 300
+#define STACK_LOW_PERCENT 20        // a task with less stack than this free is reported as a warning
 #define CONTROL_LOOP_INTERVAL HZ_TO_INTERVAL(10)
 #define SERVO_LOOP_INTERVAL HZ_TO_INTERVAL(50)
 #define MAG_LOOP_INTERVAL HZ_TO_INTERVAL(5)
@@ -379,6 +387,10 @@ void StartServoTask(void *argument);
 void rgb_led_task(void *argument);
 
 /* USER CODE BEGIN PFP */
+static void report_bus(void);
+static void report_sensors(void);
+static void report_load(void);
+static void report_stacks(void);
 static int clock_hse_fallback(void);
 int __io_putchar(int ch);
 
@@ -1061,6 +1073,112 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+// Servo bus diagnostics of the last STATUS_REPORT_PERIOD_S: one line, or the failures
+// spelled out at warning level when there were any (see bus_diag.c)
+static void report_bus(void)
+{
+    static bus_diag_snapshot_t prev;
+    static bus_diag_snapshot_t cur;
+    static bus_diag_report_t report;
+    static bool started;
+
+    if (!started) {
+        // The first window starts here, not at boot
+        bus_diag_snapshot(&prev, true);
+        started = true;
+    }
+
+    bus_diag_snapshot(&cur, true);
+    bus_diag_format(&prev, &cur, STATUS_REPORT_PERIOD_S, &report);
+    prev = cur;
+
+    if (report.window_errors) {
+        LOG_WARN("%s", report.summary);
+        LOG_WARN("%s", report.protocol);
+        LOG_WARN("%s", report.transport);
+        if (report.servos[0] != '\0') {
+            LOG_WARN("%s", report.servos);
+        }
+    } else {
+        LOG_INFO("%s", report.summary);
+    }
+    if (report.boot[0] != '\0') {
+        LOG_INFO("%s", report.boot);
+    }
+}
+
+// Latest sensor values and the attitude estimate, one line
+static void report_sensors(void)
+{
+    LOG_INFO("[Sensors] gyr %5.2f %5.2f %5.2f | acc %5.2f %5.2f %5.2f | mag %.2f %.2f %.2f | "
+             "ekf roll %5.2f pitch %5.2f yaw %5.2f",
+             gyro_snapshot[0], gyro_snapshot[1], gyro_snapshot[2],
+             accel_snapshot[0], accel_snapshot[1], accel_snapshot[2],
+             mag_snapshot[0], mag_snapshot[1], mag_snapshot[2],
+             ekf_out.roll, ekf_out.pitch, ekf_out.yaw);
+}
+
+// Femur and tibia load of every leg, % of maximum, servo frame
+static void report_load(void)
+{
+    float32_t load[6][3];
+    servo_copy_load(load, &servo_shared_state);
+    LOG_DEBUG("[LOAD] f/t %%: L0 %.1f/%.1f L1 %.1f/%.1f L2 %.1f/%.1f L3 %.1f/%.1f L4 %.1f/%.1f L5 %.1f/%.1f",
+        load[0][1], load[0][2], load[1][1], load[1][2], load[2][1], load[2][2],
+        load[3][1], load[3][2], load[4][1], load[4][2], load[5][1], load[5][2]);
+}
+
+// Free stack of every task in one line: a warning, with the low ones marked, when any
+// task has less than STACK_LOW_PERCENT of its stack left
+static void report_stacks(void)
+{
+    const osThreadId_t tasks[] = {
+        defaultTaskHandle, spiSlaveTaskHandle, gyroTaskHandle,
+        accelTaskHandle, magTaskHandle, ekfTaskHandle,
+        usartRxTaskHandle, usartTxTaskHandle, controlTaskHandle,
+        servoTaskHandle, rgbLedTaskHandle
+    };
+    const char *const names[] = {
+        "Default", "SPI", "Gyro", "Accel", "Mag", "EKF",
+        "RX", "TX", "Control", "Servo", "LED"
+    };
+    const uint32_t sizes[] = {
+        defaultTask_attributes.stack_size, spiSlaveTask_attributes.stack_size,
+        gyroTask_attributes.stack_size, accelTask_attributes.stack_size,
+        magTask_attributes.stack_size, ekfTask_attributes.stack_size,
+        usartRxTask_attributes.stack_size, usartTxTask_attributes.stack_size,
+        controlTask_attributes.stack_size, servoTask_attributes.stack_size,
+        rgbLedTask_attributes.stack_size
+    };
+
+    char line[256];
+    size_t used = 0;
+    bool low = false;
+
+    for (size_t i = 0; i < sizeof(tasks) / sizeof(tasks[0]); i++) {
+        if (tasks[i] == NULL || used >= sizeof(line)) {
+            continue;
+        }
+        const uint32_t free_bytes = osThreadGetStackSpace(tasks[i]);
+        const bool is_low = free_bytes * 100U < sizes[i] * STACK_LOW_PERCENT;
+        low = low || is_low;
+
+        const int n = snprintf(line + used, sizeof(line) - used, "%s%s %lu/%lu%s",
+                               used == 0 ? "" : ", ", names[i],
+                               (unsigned long) free_bytes, (unsigned long) sizes[i], is_low ? "!" : "");
+        if (n < 0) {
+            break;
+        }
+        used += (size_t) n;
+    }
+
+    if (low) {
+        LOG_WARN("[Stack] free/total bytes, ! = under %d%% free: %s", STACK_LOW_PERCENT, line);
+    } else {
+        LOG_INFO("[Stack] free/total bytes: %s", line);
+    }
+}
 /**
  * HSE start-up fallback.
  *
@@ -2057,97 +2175,30 @@ void StartDefaultTask(void *argument)
 
     uint32_t tick_count = osKernelGetTickCount();
 
-    int clock = 0;
-    int stack_report_counter = 0;
-
-    // Servo bus diagnostics, reported every BUS_DIAG_REPORT_S seconds
-    static bus_diag_snapshot_t diag_prev;
-    static bus_diag_snapshot_t diag_cur;
-    static bus_diag_report_t diag_report;
-    int diag_report_counter = 0;
-    bus_diag_snapshot(&diag_prev, true);
+    // One timer per report, all started now: reports with the same period come out
+    // together, in the order below.
+    const uint32_t start_ms = (uint32_t) osKernelGetTickCount() * portTICK_PERIOD_MS;
+    periodic_t status_timer, load_timer, stack_timer;
+    periodic_init(&status_timer, STATUS_REPORT_PERIOD_S * 1000U, start_ms);
+    periodic_init(&load_timer, LOAD_REPORT_PERIOD_S * 1000U, start_ms);
+    periodic_init(&stack_timer, STACK_REPORT_PERIOD_S * 1000U, start_ms);
 
     /* Infinite loop */
     for (;;) {
-        clock++;
-        stack_report_counter++;
-        diag_report_counter++;
+        const uint32_t now_ms = (uint32_t) osKernelGetTickCount() * portTICK_PERIOD_MS;
 
-        if (diag_report_counter >= BUS_DIAG_REPORT_S) {
-            diag_report_counter = 0;
-            bus_diag_snapshot(&diag_cur, true);
-            bus_diag_format(&diag_prev, &diag_cur, BUS_DIAG_REPORT_S, &diag_report);
-            diag_prev = diag_cur;
-
-            if (diag_report.window_errors) {
-                LOG_WARN("%s", diag_report.summary);
-                LOG_WARN("%s", diag_report.protocol);
-                LOG_WARN("%s", diag_report.transport);
-                if (diag_report.servos[0] != '\0') {
-                    LOG_WARN("%s", diag_report.servos);
-                }
-            } else {
-                LOG_INFO("%s", diag_report.summary);
-            }
-            if (diag_report.boot[0] != '\0') {
-                LOG_INFO("%s", diag_report.boot);
-            }
+        if (periodic_due(&status_timer, now_ms)) {
+            report_bus();
+            report_sensors();
+        }
+        if (periodic_due(&load_timer, now_ms)) {
+            report_load();
+        }
+        if (periodic_due(&stack_timer, now_ms)) {
+            report_stacks();
         }
 
-        // FIXME clock is a horrible way to print data periodically, do better.
-        if (clock % 5 == 0) {
-            // Femur and tibia load of every leg, % of maximum, servo frame
-            float32_t load[6][3];
-            servo_copy_load(load, &servo_shared_state);
-            LOG_DEBUG("[LOAD] f/t %%: L0 %.1f/%.1f L1 %.1f/%.1f L2 %.1f/%.1f L3 %.1f/%.1f L4 %.1f/%.1f L5 %.1f/%.1f",
-                load[0][1], load[0][2], load[1][1], load[1][2], load[2][1], load[2][2],
-                load[3][1], load[3][2], load[4][1], load[4][2], load[5][1], load[5][2]);
-        }
-
-        if (clock % (5 * 5) == 0) {
-            LOG_INFO("[GYR] x %5.2f, y %5.2f, z %5.2f",
-                gyro_snapshot[0], gyro_snapshot[1], gyro_snapshot[2]);
-            LOG_INFO("[ACC] x %5.2f, y %5.2f, z %5.2f",
-                accel_snapshot[0], accel_snapshot[1], accel_snapshot[2]);
-            LOG_INFO("[MAG] x %.8f, y %.8f, z %.8f",
-                mag_snapshot[0], mag_snapshot[1], mag_snapshot[2]);
-            LOG_INFO("[EKF] roll %5.2f, pitch %5.2f, yaw %5.2f",
-                ekf_out.roll, ekf_out.pitch, ekf_out.yaw);
-        }
-
-        if (stack_report_counter >= 60) {
-            stack_report_counter = 0;
-            LOG_INFO("--- Task Stack Usage Report (Remaining/Total) ---");
-            osThreadId_t tasks[] = {
-                defaultTaskHandle, spiSlaveTaskHandle, gyroTaskHandle,
-                accelTaskHandle, magTaskHandle, ekfTaskHandle,
-                usartRxTaskHandle, usartTxTaskHandle, controlTaskHandle,
-                servoTaskHandle, rgbLedTaskHandle
-            };
-            const char* task_names[] = {
-                "Default", "SPI Slave", "Gyro", "Accel", "Mag", "EKF",
-                "USART RX", "USART TX", "Control", "Servo", "RGB LED"
-            };
-            uint32_t stack_sizes[] = {
-                defaultTask_attributes.stack_size, spiSlaveTask_attributes.stack_size,
-                gyroTask_attributes.stack_size, accelTask_attributes.stack_size,
-                magTask_attributes.stack_size, ekfTask_attributes.stack_size,
-                usartRxTask_attributes.stack_size, usartTxTask_attributes.stack_size,
-                controlTask_attributes.stack_size, servoTask_attributes.stack_size,
-                rgbLedTask_attributes.stack_size
-            };
-
-            for (size_t i = 0; i < sizeof(tasks)/sizeof(tasks[0]); i++) {
-                if (tasks[i] != NULL) {
-                    uint32_t space = osThreadGetStackSpace(tasks[i]);
-                    LOG_INFO("[Stack] %-12s: %4lu / %4lu bytes free",
-                             task_names[i], space, stack_sizes[i]);
-                }
-            }
-            LOG_INFO("-------------------------------------------------");
-        }
-
-        // Schedule at fixed 5 Hz
+        // The reports above are timed by their own timers, this only sets how finely
         tick_count += MAIN_LOOP_INTERVAL;
         osDelayUntil(tick_count);
     }
