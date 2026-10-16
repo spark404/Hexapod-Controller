@@ -106,7 +106,7 @@ verified on the robot).
 | T7.15 | 2 | Open | New, from the first bench data. A loaded leg lags its servo profile by ~100 ms and stops short of the goal: tune the position controller. |
 | T7.14 | 2 | Done | New. Bench experiment for the servo profile mode: all 103 runs on the robot, 2026-10-12. Result in [plan §6.3](servo-profile-bench-experiment.md): velocity-based computed profile if profiles are used, no sync benefit, servo lag is the issue (T7.15). |
 | T7.13 | 2 | Open | New, low priority. Byte stuffing in the library costs ~0.12 ms per bus transaction in the Debug build; do it in one pass. |
-| T7.5 | 3 | Partial | New. Slices 1 to 3 built: frames and CRC (`cmd_frame.c`), twist adapter with `T_LINK` (`command_adapter.c`), shared command state (`cmd_link.c`) and a 31-byte full-duplex SPI task in `main.c`; host tested, not run on the robot. Open: Pi `SpiSink` (slice 4), bench test. The 7-byte frames of the old interface are gone. |
+| T7.5 | 3 | Partial | New. Slices 1 to 4 built: frames and CRC (`cmd_frame.c`), twist adapter with `T_LINK` (`command_adapter.c`), shared command state (`cmd_link.c`), 31-byte full-duplex SPI task in `main.c`, and the Pi side `SpiLink` in `poom-remote`; host tested on both sides, **not run on the robot**. Open: the bench test, then the Poom firmware. The 7-byte frames of the old interface are gone. |
 | T5.1 | 4 | Open | Reach radius is a fixed 40 mm. |
 | T5.2 | 4 | Open | `attitude` still discarded (`(void)attitude`). |
 | T5.3 | 4 | Open | Open-loop body pose integration. |
@@ -893,8 +893,10 @@ fixes the layout (31 bytes, design §3.2). To do: the adapter from the twist to 
 current controller input with `T_LINK` (slice 2, `Core/Src/command_adapter.c`), the
 shared command state and full-duplex SPI task (slice 3, `cmd_link.c` and `main.c`: built,
 host tested, **not run on the robot yet**), the Pi side `SpiSink` in `poom-remote`
-(slice 4). With slice 3 the 7-byte frames of the old interface are no longer accepted
-(`gamepad_spi_service.py` stops working); nothing can command the robot until slice 4. The controller logic is not changed
+(slice 4, built and tested against a fake controller, off by default: `src/link.rs` and
+`src/frame.rs` in `poom-remote`). With slice 3 the 7-byte frames of the old interface are
+no longer accepted (`gamepad_spi_service.py` stops working). Open: the bench test with the
+real Pi (stop the `poom-remote` service when flashing, the bootloader shares the bus). The controller logic is not changed
 until T7.8.
 
 **Do.**
