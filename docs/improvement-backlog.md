@@ -106,7 +106,7 @@ verified on the robot).
 | T7.15 | 2 | Open | New, from the first bench data. A loaded leg lags its servo profile by ~100 ms and stops short of the goal: tune the position controller. |
 | T7.14 | 2 | Done | New. Bench experiment for the servo profile mode: all 103 runs on the robot, 2026-10-12. Result in [plan §6.3](servo-profile-bench-experiment.md): velocity-based computed profile if profiles are used, no sync benefit, servo lag is the issue (T7.15). |
 | T7.13 | 2 | Open | New, low priority. Byte stuffing in the library costs ~0.12 ms per bus transaction in the Debug build; do it in one pass. |
-| T7.5 | 3 | Open | New. Today: 7-byte single-parameter frames, no CRC, no reply. |
+| T7.5 | 3 | Partial | New. Slice 1 done: frame layout, CRC, status frame and seq handling in `cmd_frame.c` (host tested). Open: adapter and `T_LINK`, full-duplex SPI task, Pi `SpiSink`. Today's SPI task still takes 7-byte single-parameter frames, no CRC, no reply. |
 | T5.1 | 4 | Open | Reach radius is a fixed 40 mm. |
 | T5.2 | 4 | Open | `attitude` still discarded (`(void)attitude`). |
 | T5.3 | 4 | Open | Open-loop body pose integration. |
@@ -887,6 +887,12 @@ The Pi-facing protocol: one atomic command, CRC, status reply and link supervisi
 **Source:** [`design.md`](design.md) §3.
 **Effort:** M.
 **Depends on:** T1.6.
+**Status:** in progress, in slices. Slice 1 (the frame, CRC, status frame and sequence
+handling: `Core/Src/cmd_frame.c`, host test `tests/cmd_frame_test.c`) is done and
+fixes the layout (31 bytes, design §3.2). To do: the adapter from the twist to the
+current controller input with `T_LINK` (slice 2), the full-duplex SPI task (slice 3),
+the Pi side `SpiSink` in `poom-remote` (slice 4). The controller logic is not changed
+until T7.8.
 
 **Do.**
 1. Define the single fixed-size command frame (`magic`, `version`, `seq`,

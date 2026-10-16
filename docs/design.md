@@ -106,8 +106,10 @@ loop itself using the yaw it reads back in status.
 ### 3.2 Frame format
 
 Today: 7-byte frames, magic `0xA5`, one parameter each, no checksum, no
-sequence, no reply. Proposed single fixed-size frame (field layout is a
-proposal, not final):
+sequence, no reply. The single fixed-size frame below is **adopted** (31 bytes,
+little-endian, CRC-16/IBM-3740 over bytes 0 to 28). The byte-exact definition,
+including the status frame, is in [`Core/Inc/cmd_frame.h`](../Core/Inc/cmd_frame.h)
+with golden frames in `tests/cmd_frame_test.c`:
 
 ```
 magic(1) | version(1) | seq(1) | flags(1) | vx f32 | vy f32 | wz f32 |
