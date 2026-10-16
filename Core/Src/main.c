@@ -39,6 +39,8 @@
 
 #include "ring_buffer.h"
 #include "log_sink_port.h"
+#include "cmd_link.h"
+#include "command_adapter.h"
 
 #include "dynamixel/dynamixel.h"
 
@@ -52,6 +54,7 @@
 #include "bus_diag.h"
 #include "dynamixel/protocol.h"
 #include "controller.h"
+#include "controller_config.h"
 #include "controller_math.h"
 #include "error_handling.h"
 #include "event_groups.h"
@@ -311,14 +314,25 @@ dynamixel_servo_t dynamixel_servos[3 * 6];
 
 volatile osThreadId_t servoCallbackThreadId;
 
+// Lock of the command link state shared by the SPI task and the control task.
+// A critical section of a few microseconds, usable from both tasks.
+static uint32_t cmd_link_lock(void)
+{
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    return primask;
+}
+
+static void cmd_link_unlock(uint32_t primask)
+{
+    __set_PRIMASK(primask);
+}
+
+static const cmd_link_port_t cmd_link_port = {cmd_link_lock, cmd_link_unlock};
+
 float32_t velocity = 0.0f; // mm/s
 float32_t heading = 0.0f; // rad
 float32_t height = 100.f; // mm, body height from ground
-
-// We only update at the start of the loop, store the new values here
-float32_t updated_velocity = 0.f;
-float32_t updated_heading = 0.f;
-float32_t updated_height = 100.f;
 
 ekf_output_t ekf_out;
 
@@ -463,6 +477,7 @@ int main(void)
 
     // From here printf() queues into a buffer drained by DMA instead of busy-waiting
     log_sink_uart_init();
+    cmd_link_init(&cmd_link_port);
 
     HAL_TIM_Base_Start(&htim1);
 
@@ -1424,6 +1439,16 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi) {
     osThreadFlagsSet(spiSlaveTaskHandle, SPI1_RX_CPLT);
 }
 
+// The SPI link transfers a command and a status frame at the same time
+void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi) {
+    if (hspi != &hspi1) {
+        return;
+    }
+
+    // osThreadFlagsSet internally handles context switching from ISR
+    osThreadFlagsSet(spiSlaveTaskHandle, SPI1_RX_CPLT);
+}
+
 void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi) {
     if (hspi != &hspi1) {
         return;
@@ -2148,20 +2173,22 @@ void StartSpiSlaveTask(void *argument)
                 pdTRUE,
                 portMAX_DELAY);
 
-    // Message format (7 bytes)
-    //   uint8_t magic
-    //   uint8_t reserved
-    //   uint8_t register
-    //   uint32_t value
-    uint8_t buffer[16];
+    // Frames of the command link (cmd_frame.h): every transfer is CMD_FRAME_LEN bytes
+    // in both directions. The master clocks out a command and clocks in the status
+    // prepared before the transfer, so the status lags the command by one frame.
+    // Hardware NSS frames each transfer; a damaged or cut short transfer fails the
+    // CRC and the link recovers at the next one.
+    static uint8_t rx_frame[CMD_FRAME_LEN];
+    static uint8_t tx_frame[CMD_FRAME_LEN];
+    uint32_t last_warn_ms = 0;
+    bool warned = false;
 
     /* Infinite loop */
     for (;;) {
-        LOG_INFO("[StartSpiSlaveTask] Waiting for receive...");
+        cmd_link_get_reply(tx_frame);
 
-        // Start length byte reception
-        if (HAL_SPI_Receive_IT(&hspi1, buffer, 7) != HAL_OK) {
-            LOG_ERROR("[StartSpiSlaveTask] HAL_SPI_Receive error");
+        if (HAL_SPI_TransmitReceive_IT(&hspi1, tx_frame, rx_frame, CMD_FRAME_LEN) != HAL_OK) {
+            LOG_ERROR("[StartSpiSlaveTask] HAL_SPI_TransmitReceive error");
 
             // Abort and reset SPI peripheral state
             HAL_SPI_Abort(&hspi1);
@@ -2170,81 +2197,28 @@ void StartSpiSlaveTask(void *argument)
         }
 
         const uint32_t flags = osThreadFlagsWait(SPI1_RX_CPLT | SPI1_ERROR, osFlagsWaitAny, portMAX_DELAY);
-        if (flags == (uint32_t) osErrorTimeout) {
-            LOG_DEBUG("[StartSpiSlaveTask] osThreadFlagsWait timeout");
+        if ((flags & 0x80000000U) != 0U || (flags & SPI1_ERROR) != 0U) {
+            // osThreadFlagsWait error or SPI error (overrun, mode fault): start over
             HAL_SPI_Abort(&hspi1);
+            vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
-        if (flags & (1U << 31)) {
-            LOG_DEBUG("[StartSpiSlaveTask] osThreadFlagsWait error %ld", flags);
+        const uint32_t now_ms = osKernelGetTickCount() * portTICK_PERIOD_MS;
+        if (cmd_link_on_frame(rx_frame, CMD_FRAME_LEN, now_ms) == CMD_RX_BAD) {
+            // Possibly out of step with the master: drop whatever is pending
             HAL_SPI_Abort(&hspi1);
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
 
-        if (flags & SPI1_ERROR) {
-            LOG_DEBUG("[StartSpiSlaveTask] receive error");
-            HAL_SPI_Abort(&hspi1);
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
-
-        // Check the magic header
-        if (buffer[0] != 0xA5) {
-            LOG_ERROR("[StartSpiSlaveTask] Invalid magic header: 0x%02x", buffer[0]);
-            // Reset SPI state to resync with master
-            HAL_SPI_Abort(&hspi1);
-            continue;
-        }
-
-        // Received the data
-        switch (buffer[2]) {
-            case 0x01: {
-                // Command set speed
-                // Use memcpy to avoid alignment issues
-                float32_t new_velocity;
-                memcpy(&new_velocity, &buffer[3], sizeof(float32_t));
-                if (new_velocity < 0 || new_velocity > 100) {
-                    LOG_WARN("[StartSpiSlaveTask] Ignoring new velocity %5.2f", new_velocity);
-                    break;
-                }
-                LOG_INFO("[StartSpiSlaveTask] Set speed to %5.2f mm/s", new_velocity);
-                updated_velocity = new_velocity;
-                break;
+            // No logging per frame (25 Hz and up), at most one line every 5 s
+            if (!warned || (uint32_t) (now_ms - last_warn_ms) >= 5000U) {
+                cmd_rx_t stats;
+                cmd_link_get_stats(&stats);
+                LOG_WARN("[StartSpiSlaveTask] bad command frame (error %d), crc %lu, other %lu, ok %lu",
+                         (int) stats.last_error, (unsigned long) stats.crc_errors,
+                         (unsigned long) stats.rejected, (unsigned long) stats.accepted);
+                last_warn_ms = now_ms;
+                warned = true;
             }
-
-            case 0x02: {
-                // Command set heading
-                // Use memcpy to avoid alignment issues
-                float32_t new_heading;
-                memcpy(&new_heading, &buffer[3], sizeof(float32_t));
-                if (new_heading < 0 || new_heading > (2.0f * M_PI)) {
-                    LOG_WARN("[StartSpiSlaveTask] Ignoring new heading %5.3f rad", new_heading);
-                    break;
-                }
-                LOG_INFO("[StartSpiSlaveTask] Set heading to %5.3f rad", new_heading);
-                updated_heading = new_heading;
-                break;
-            }
-
-            case 0x03: {
-                // Command set height
-                // Use memcpy to avoid alignment issues
-                float32_t new_height;
-                memcpy(&new_height, &buffer[3], sizeof(float32_t));
-                if (new_height < 50 || new_height > 170) {
-                    LOG_WARN("[StartSpiSlaveTask] Ignoring new body height %5.2f", new_height);
-                    break;
-                }
-                LOG_INFO("[StartSpiSlaveTask] Set new body height to %5.2f mm", new_height);
-                updated_height = new_height;
-                break;
-            }
-
-            default:
-                LOG_WARN("[StartSpiSlaveTask] Unknown command: 0x%02x", buffer[2]);
-                break;
         }
     }
   /* USER CODE END StartSpiSlaveTask */
@@ -2681,6 +2655,20 @@ void StartControlTask(void *argument)
     controller_init(&controller_ctx);
     controller_set_state_callback(&controller_ctx, stm32_state_change_cb, NULL);
 
+    // The SPI link carries a twist, the controller still takes a speed along its
+    // own heading and an absolute heading: the adapter bridges the two (T7.5).
+    const adapter_cfg_t adapter_cfg = {
+        .max_speed = 100.0f,
+        .max_yaw_rate = CTRL_MAX_YAW_RATE,
+        .min_height = 50.0f,
+        .max_height = 170.0f,
+        .max_accel = 200.0f,
+        .link_timeout_ms = 300,
+    };
+    adapter_t adapter;
+    adapter_report_t link_report = {0};
+    adapter_init(&adapter, &adapter_cfg, 0.0f, CTRL_BODY_Z);
+
     osEventFlagsSet(systemEventsHandle, EVT_CONTROLLER_READY);
 
     TickType_t last_ticks = osKernelGetTickCount();
@@ -2696,10 +2684,18 @@ void StartControlTask(void *argument)
       // Revisit if the controlTask rate changes.
       dt_s = clampf(dt_s, 0.05f, 0.2f);
 
-      // Update control information from shared state
-      cmd.velocity = updated_velocity;
-      cmd.heading = updated_heading;
-      cmd.height = updated_height;
+      // Update control information from the command link
+      cmd_frame_t link_cmd;
+      uint32_t link_rx_ms;
+      const uint32_t now_ms = (uint32_t) now * portTICK_PERIOD_MS;
+      if (cmd_link_take(&link_cmd, &link_rx_ms)) {
+          adapter_set_command(&adapter, &link_cmd, link_rx_ms);
+      }
+      adapter_output_t adapted;
+      adapter_step(&adapter, now_ms, dt_s, &adapted, &link_report);
+      cmd.velocity = adapted.velocity;
+      cmd.heading = adapted.heading;
+      cmd.height = adapted.height;
 
       // Update the actual from the shared state
       servo_copy_actual_joint_angles(actual_joint_angles, &servo_shared_state);
@@ -2712,6 +2708,22 @@ void StartControlTask(void *argument)
       }
 
       controller_update(&controller_ctx, &attitude, &cmd, dt_s);
+
+      // Status for the replies on the command link. The power down request and fault
+      // clear flags are not acted on yet (no controller support), which is reported
+      // as limited. The contact is not measured yet (T7.6): the flag is not set.
+      const status_frame_t link_status = {
+          .seq = link_report.seq,
+          .state = (uint8_t) controller_ctx.state,
+          .fault = 0,
+          .flags = (uint8_t) ((link_report.link_ok ? STATUS_FLAG_LINK_OK : 0U) |
+                              ((link_report.limited || link_report.powerdown_request || link_report.fault_clear)
+                                   ? STATUS_FLAG_LIMITED
+                                   : 0U)),
+          .contact = 0,
+          .yaw = wrap_to_pi(controller_ctx.robot.hexapod.rotation[2]),
+      };
+      cmd_link_publish_status(&link_status);
 
       // Update the shared state from the controller state
       for (int i = 0; i < 6; i++) {

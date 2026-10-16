@@ -38,7 +38,8 @@
  *                    the rest up to the CRC is zero. A reader uses the fields it
  *                    knows and ignores the others.
  *   3       seq      seq of the last command applied
- *   4       state    controller state (controller_state_t)
+ *   4       state    controller state (controller_state_t): 0 boot, 1 syncing,
+ *                    2 standup, 3 standing, 4 walking, 5 rotating, 6 powerdown
  *   5       fault    fault code, 0 = none
  *   6       flags    STATUS_FLAG_*
  *   7       contact  bit n set = leg n touches the ground
