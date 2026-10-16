@@ -77,7 +77,8 @@ and T7.12 is done, all verified on the robot (commits `2b0e064`, `d6c1be3`,
 implemented): T7.4 is done (units and the byte stuffing fix confirmed on the robot,
 the bench experiment used the same registers), T7.14 is done and T7.15 was added.
 Updated 2026-10-16: T4.1 is implemented (commit `cb73897`, not yet verified on the
-robot), which makes T2.4 moot; the plumbing for T4.2 is in place.
+robot), which makes T2.4 moot. T4.2 is implemented too (commit `2fca015`, not yet
+verified on the robot).
 
 | Item | Phase | Status | Note |
 |------|:-----:|--------|------|
@@ -97,7 +98,7 @@ robot), which makes T2.4 moot; the plumbing for T4.2 is in place.
 | T7.12 | 1 | Done | New. Servo bus diagnostics every 30 s (`34e582f`). |
 | T3.5 | 2 | Open | No related code. |
 | T4.1 | 2 | Partial | Implemented (`cb73897`): fixed profile with every goal, software interpolation removed. Not yet verified on the robot. |
-| T4.2 | 2 | Open | Plumbing in place (`c93cd96`, `cb73897`): `servo_profile_compute()`, target sequence and duration in the shared state, 12-byte write. Left: compute v and a per joint in the write. |
+| T4.2 | 2 | Partial | Implemented (`2fca015`): v and a per joint per goal, measured from the servo's Position Trajectory, acceleration floor 40 rad/s². `SERVO_PROFILE_MODE` switches back to the fixed profile. Not yet verified on the robot; T factor and ramp not yet chosen from the E4 data. |
 | T7.2 | 2 | Open | New. |
 | T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
 | T7.4 | 2 | Done | New. Load, velocity and position come back in one 10-byte Sync Read and are published (`f1f0a2c`). Verified on the robot: values and timing as expected, units confirmed by the bench experiment, byte stuffing fixed (library `0a49c5c`, 0 failures in 2,950 reads). Left over: the rare read timeout (~1 per 3,000 cycles, first run) is not explained. |
@@ -761,18 +762,37 @@ joint-space interpolation chooses. Phase 2 scales
 `PROFILE_VELOCITY` per joint per tick so all joints in a leg
 finish together, preserving the planned trajectory.
 
-**Do.** Superseded in part by what T4.1 built: the servo task, not the controller,
-computes the profile. Per joint, Δ = the new goal − the previous written goal (not the
-measured position, which lags), T = factor × the published `target_duration_s` and
-Tr = fraction × T, then `servo_profile_compute()` gives v and a for the 12-byte write.
-Start with factor 1.2 and fraction 0.25 (the middle of what E4 tested and the bench's
-ramp); re-analyse the E4 log per T factor before fixing them. Keep the fixed profile
-behind a compile-time switch to compare.
+**Status:** **implemented (2026-10-16), not yet verified on the robot** (commit
+`2fca015`). As built, replacing the implementation note's steps:
+- The servo task, not the controller, computes the profile (`servo_computed_profiles()`
+  in `main.c`). Per joint, Δ = the new goal − the servo's **Position Trajectory**, read
+  in the same tick. Not the previous goal: with T longer than the period the profile
+  has not quite reached it, and a small next move measured from it would crawl over
+  the rest (25 mrad at 0.056 rad/s takes half a second). Not the measured position,
+  which lags the profile by 40–60 ms. A servo that did not answer the read falls back
+  to its previous goal.
+- T = `SERVO_PROFILE_T_FACTOR` (1.2) × the published `target_duration_s`, Tr =
+  `SERVO_PROFILE_TR_FRACTION` (0.25) × T, then `servo_profile_compute()`:
+  v = |Δ|/(T−Tr), a = v/Tr.
+- **Acceleration floor** `SERVO_PROFILE_MIN_ACCELERATION_RADPS2` (40 rad/s²): the
+  servo also brakes with Profile Acceleration. A tiny move after a fast one (the end
+  of a femur lift, the walk-to-stand transition) would otherwise give a ≈ 0 and the
+  joint would take seconds to stop and run far past the goal. The bench paths (ramp,
+  sine) change smoothly and do not show this; the gait's bursts do.
+- `SERVO_PROFILE_MODE` (`main.c`) selects `COMPUTED` (default) or `FIXED` (T4.1) to
+  compare on the robot. The first goals after a sync keep the fixed profile.
+- Left: choose the T factor from the E4 log per factor (0.8, 1.2, 1.5); the docs only
+  report the modes.
 
-**Verify.** Eight-step plan in the implementation note §8.
-Highlights:
-- *Bench:* single leg with large unequal joint deltas; confirm
-  joints arrive simultaneously.
+**Do (original).** Superseded by the status above.
+
+**Verify.** Eight-step plan in the implementation note §8, except the
+synchronisation, which the bench ruled out. Highlights:
+- *Bench:* replay realistic gait sequences (walk 50/100 mm/s, turn) with `FIXED`
+  and `COMPUTED`; the published profile velocity
+  (`servo_copy_profile_tracking()`) should stay steady through a tick instead of
+  peaking and falling to 0, with no run-on after a femur lift and no crawl into
+  standing.
 - *Walk:* high-speed walking; foot path should track the
   planned lift trapezoid closely (visible on a marked floor
   or via simulator overlay).
