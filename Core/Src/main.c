@@ -41,6 +41,7 @@
 #include "log_sink_port.h"
 #include "cmd_link.h"
 #include "periodic.h"
+#include "accel_gate.h"
 #include "command_adapter.h"
 
 #include "dynamixel/dynamixel.h"
@@ -125,6 +126,8 @@ MATRIX(M, 4)
 #define STACK_REPORT_PERIOD_S 300
 #define STACK_LOW_PERCENT 20        // a task with less stack than this free is reported as a warning
 #define HEAP_LOW_BYTES 4096         // the lowest the FreeRTOS heap has been, below this it is a warning
+#define SERVO_VOLTAGE_LOW_DV 95     // servo input below 9.5 V (units of 0.1 V) is reported as a warning
+#define SERVO_TEMPERATURE_HIGH_C 65 // servo temperature at or above this is reported as a warning
 #define CONTROL_LOOP_INTERVAL HZ_TO_INTERVAL(10)
 #define SERVO_LOOP_INTERVAL HZ_TO_INTERVAL(50)
 #define MAG_LOOP_INTERVAL HZ_TO_INTERVAL(5)
@@ -351,6 +354,7 @@ uint8_t accel_interrupt_enable = 0;
 float32_t gyro_snapshot[3];
 float32_t accel_snapshot[3];
 float32_t mag_snapshot[3];
+accel_gate_t accel_gate;   // written by the accel task, read by the status report
 
 // USART buffers
 static uint8_t dma_rx_buf[DMA_RX_BUF_SIZE];
@@ -390,6 +394,8 @@ void rgb_led_task(void *argument);
 /* USER CODE BEGIN PFP */
 static void report_bus(void);
 static void report_sensors(void);
+static void report_accel_gate(void);
+static void report_servo_health(void);
 static void report_load(void);
 static void report_stacks(void);
 static void rtos_check_created(void);
@@ -843,7 +849,7 @@ static void MX_SPI2_Init(void)
   hspi2.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi2.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi2.Init.NSS = SPI_NSS_SOFT;
-  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi2.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
   hspi2.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi2.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi2.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -1120,6 +1126,58 @@ static void report_sensors(void)
              accel_snapshot[0], accel_snapshot[1], accel_snapshot[2],
              mag_snapshot[0], mag_snapshot[1], mag_snapshot[2],
              ekf_out.roll, ekf_out.pitch, ekf_out.yaw);
+}
+
+// What the accelerometer check rejected since the last report: samples whose length is not 1 g
+static void report_accel_gate(void)
+{
+    static uint32_t prev_accepted, prev_rejected;
+    const uint32_t accepted = accel_gate.accepted, rejected = accel_gate.rejected;
+    const uint32_t d_ok = accepted - prev_accepted, d_bad = rejected - prev_rejected;
+    prev_accepted = accepted;
+    prev_rejected = rejected;
+
+    if (d_bad == 0) {
+        LOG_INFO("[Accel] %lu samples, none rejected", (unsigned long) d_ok);
+        return;
+    }
+    LOG_INFO("[Accel] %lu of %lu samples rejected (length not 1 g +-%.1f m/s2), last bad raw %d %d %d, %.1f m/s2",
+             (unsigned long) d_bad, (unsigned long) (d_ok + d_bad), (double) accel_gate.tolerance,
+             accel_gate.last_rejected_raw[0], accel_gate.last_rejected_raw[1], accel_gate.last_rejected_raw[2],
+             (double) accel_gate.last_rejected_norm);
+}
+
+// Input voltage and temperature of the servos (read with every state read): the supply sagging or a servo
+// heating up would show here before it shows as a missing reply
+static void report_servo_health(void)
+{
+    uint16_t volt[6][3];
+    uint8_t temp[6][3];
+    servo_copy_health(volt, temp, &servo_shared_state);
+
+    unsigned vmin = 0xFFFF, vmax = 0, tmax = 0, vmin_i = 0, tmax_i = 0;
+    for (unsigned i = 0; i < 18; i++) {
+        const unsigned v = volt[i / 3][i % 3], t = temp[i / 3][i % 3];
+        if (v == 0) {
+            continue;                                          // not read yet
+        }
+        if (v < vmin) { vmin = v; vmin_i = i; }
+        if (v > vmax) { vmax = v; }
+        if (t > tmax) { tmax = t; tmax_i = i; }
+    }
+    if (vmax == 0) {
+        return;
+    }
+
+    // XL430: 6.5 to 12 V, the temperature limit is 80 C
+    const bool low = vmin < SERVO_VOLTAGE_LOW_DV || tmax >= SERVO_TEMPERATURE_HIGH_C;
+    if (low) {
+        LOG_WARN("[Servos] input %u.%u to %u.%u V (lowest: servo %u), temperature up to %u C (servo %u): out of range",
+                 vmin / 10, vmin % 10, vmax / 10, vmax % 10, vmin_i, tmax, tmax_i);
+    } else {
+        LOG_INFO("[Servos] input %u.%u to %u.%u V (lowest: servo %u), temperature up to %u C (servo %u)",
+                 vmin / 10, vmin % 10, vmax / 10, vmax % 10, vmin_i, tmax, tmax_i);
+    }
 }
 
 // Femur and tibia load of every leg, % of maximum, servo frame
@@ -2031,9 +2089,10 @@ static uint32_t diag_elapsed_us(const uint32_t start_cycles)
 }
 
 /* Present Load (126, 2 bytes), Present Velocity (128, 4), Present Position
- * (132, 4), Velocity Trajectory (136, 4) and Position Trajectory (140, 4) are
- * adjacent: one 18 byte read per servo gets all five. */
-#define XL430_STATE_LEN 18
+ * (132, 4), Velocity Trajectory (136, 4), Position Trajectory (140, 4), Present Input Voltage
+ * (144, 2, units of 0.1 V) and Present Temperature (146, 1, degrees C) are adjacent: one
+ * 21 byte read per servo gets all seven. */
+#define XL430_STATE_LEN 21
 #define XL430_STATUS_ALERT 0x80
 #define XL430_PULSE_RAD (2.0f * (float32_t) M_PI / 4096.0f)
 
@@ -2045,6 +2104,9 @@ typedef struct {
     float32_t velocity[6][3];   /* rad/s, servo frame */
     float32_t tracking_error[6][3];      /* Position Trajectory - Present Position, rad, servo frame */
     float32_t profile_velocity[6][3];    /* Velocity Trajectory, rad/s, servo frame */
+    uint16_t voltage_dv[6][3];  /* Present Input Voltage, 0.1 V */
+    uint8_t temperature_c[6][3];         /* Present Temperature, degrees C */
+    uint16_t min_voltage_dv;    /* lowest input voltage of the servos that answered; of the last read that had data when none did */
     bool valid[6][3];           /* this servo returned data; otherwise the values above are untouched */
     bool link_error;            /* a timeout or bus error: the receiver needs a reset */
 } servo_read_t;
@@ -2061,6 +2123,7 @@ typedef struct {
 static dynamixel_result_t servo_bus_read_state(servo_read_t *out)
 {
     static uint32_t alert_mask;     /* servos reporting an alert, to log changes only */
+    static uint16_t last_min_voltage_dv;
 
     uint8_t data[18 * XL430_STATE_LEN];
     dynamixel_result_t status[18];
@@ -2075,6 +2138,7 @@ static dynamixel_result_t servo_bus_read_state(servo_read_t *out)
     uint32_t new_alert_mask = 0;
     bool link_blamed = false;
     out->link_error = false;
+    out->min_voltage_dv = 0;
 
     for (int s = 0; s < 18; s++) {
         const dynamixel_result_t st = status[s];
@@ -2088,6 +2152,12 @@ static dynamixel_result_t servo_bus_read_state(servo_read_t *out)
             out->position[s / 3][s % 3] = dynamixel_decode_u32(&d[6]);
             out->profile_velocity[s / 3][s % 3] = xl430_velocity_to_radps(dynamixel_decode_i32(&d[10]));
             out->profile_position[s / 3][s % 3] = dynamixel_decode_u32(&d[14]);
+            const uint16_t volt = (uint16_t) ((uint16_t) d[18] | ((uint16_t) d[19] << 8));
+            out->voltage_dv[s / 3][s % 3] = volt;
+            out->temperature_c[s / 3][s % 3] = d[20];
+            if (out->min_voltage_dv == 0 || volt < out->min_voltage_dv) {
+                out->min_voltage_dv = volt;
+            }
             out->tracking_error[s / 3][s % 3] =
                 (float32_t) (dynamixel_decode_i32(&d[14]) - dynamixel_decode_i32(&d[6])) * XL430_PULSE_RAD;
             if (st == XL430_STATUS_ALERT) {
@@ -2110,6 +2180,13 @@ static dynamixel_result_t servo_bus_read_state(servo_read_t *out)
         } else {
             bus_diag_servo_failure((unsigned) s);
         }
+    }
+
+    // A missing reply from the first servo leaves every servo silent: report the last known voltage then
+    if (out->min_voltage_dv == 0) {
+        out->min_voltage_dv = last_min_voltage_dv;
+    } else {
+        last_min_voltage_dv = out->min_voltage_dv;
     }
 
     if (alerts > 0) {
@@ -2229,7 +2306,9 @@ void StartDefaultTask(void *argument)
 
         if (periodic_due(&status_timer, now_ms)) {
             report_bus();
+            report_servo_health();
             report_sensors();
+            report_accel_gate();
         }
         if (periodic_due(&load_timer, now_ms)) {
             report_load();
@@ -2370,6 +2449,7 @@ void StartGyroTask(void *argument)
         // Read BMI088 gyro (SPI)
         if (bmi08g_get_data(&gyro, &bmi088) != 0) {
             LOG_ERROR("[GyroTask] Failed to get data");
+            osMutexRelease(spiMutexHandle);   // without this every later read times out for good
             continue;
         }
 
@@ -2430,6 +2510,7 @@ void StartAccelTask(void *argument)
     struct bmi08_sensor_data accel;
 
 
+    accel_gate_init(&accel_gate, ACCEL_GATE_DEFAULT_TOLERANCE);
     accel_interrupt_enable = 1;
 
     uint8_t range = bmi088.accel_cfg.range;
@@ -2448,6 +2529,7 @@ void StartAccelTask(void *argument)
         // Read BMI088 gyro (SPI)
         if (bmi08a_get_data(&accel, &bmi088) != 0) {
             LOG_ERROR("[AccelTask] Failed to get data");
+            osMutexRelease(spiMutexHandle);   // without this every later read times out for good
             continue;
         }
 
@@ -2458,6 +2540,13 @@ void StartAccelTask(void *argument)
         sensor_frame_data[1] = stm32_bmi08a_scale_data(accel.y, range) * GRAVITY / 1000;
         sensor_frame_data[2] = stm32_bmi08a_scale_data(accel.z, range) * GRAVITY / 1000;
         stm32_bmi08a_sensor_to_ned(sensor_frame_data, sample.data);
+
+        // Roll and pitch come from the direction of gravity: a sample that is not 1 g long is not gravity
+        // (a corrupted read, an impact) and would pull the attitude off. The gyro carries the estimate meanwhile.
+        const int16_t accel_raw[3] = {accel.x, accel.y, accel.z};
+        if (!accel_gate_check(&accel_gate, sample.data, accel_raw)) {
+            continue;
+        }
 
         sample.type = SENSOR_ACCEL;
         sample.tick = osKernelGetTickCount();
@@ -2912,6 +3001,7 @@ void StartServoTask(void *argument)
             // B) Update the shared state to the current state of the hardware
             servo_set_actual_and_target_joint_angles(&servo_shared_state, joint_angles);
             servo_set_load_and_velocity(&servo_shared_state, servo_read.load, servo_read.velocity);
+            servo_set_health(&servo_shared_state, servo_read.voltage_dv, servo_read.temperature_c);
 
             // C) Proceed to the next state
             state = SERVO_SYNC_TO_HW;
@@ -2956,10 +3046,12 @@ void StartServoTask(void *argument)
             }
             servo_set_load_and_velocity(&servo_shared_state, servo_read.load, servo_read.velocity);
             servo_set_profile_tracking(&servo_shared_state, servo_read.tracking_error, servo_read.profile_velocity);
+            servo_set_health(&servo_shared_state, servo_read.voltage_dv, servo_read.temperature_c);
 
             if (res != DNM_OK) {
-                LOG_WARN("[ServoTask] Failed to read all servos (error %d)%s", res,
-                         servo_read.link_error ? ", resetting UART" : "");
+                LOG_WARN("[ServoTask] Failed to read all servos (error %d)%s, lowest input %u.%u V", res,
+                         servo_read.link_error ? ", resetting UART" : "",
+                         (unsigned) (servo_read.min_voltage_dv / 10U), (unsigned) (servo_read.min_voltage_dv % 10U));
 
                 if (servo_read.link_error) {
                     // Wait 5ms for any pending servo responses from the BULK_READ/SYNC_READ

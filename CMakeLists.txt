@@ -85,6 +85,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         Core/Src/command_adapter.c
         Core/Src/cmd_link.c
         Core/Src/periodic.c
+        Core/Src/accel_gate.c
         Core/Src/log_sink_port.c
         Core/Src/error_handling.c
         Drivers/BMI08X/Src/bmi08a.c

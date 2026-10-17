@@ -94,7 +94,7 @@ been created (FreeRTOS heap full) and its blink never worked; both are fixed, se
 | T1.2 | 1 | Open | No `fault_code`, `CTRL_FAULT` or `SERVO_FAULT_HOLD`; `SERVO_ERROR` still calls `Error_Handler()`. |
 | T1.5 | 1 | Open | No `target_seq` / `actual_seq`. |
 | T1.6 | 1 | Partial | Output is non-blocking: a ring buffer drained by USART1 DMA (`e089914`, ran on the robot). The per-tick control debug lines (`c677613`) and the per-frame SPI log lines are removed; the periodic reports are consolidated (`9f97ea9`). Open: the default level is still DEBUG, the CPU measurement (needs T2.12), the panic flush (fatal errors) was not exercised. |
-| T2.12 | 1 | Partial | Stack usage is one line every 5 minutes, a warning when a task has under 20 % free (`9f97ea9`). Open: run-time stats and CPU %, heap, cycle counters around `controller_update`, mutex leak in the gyro/accel tasks. |
+| T2.12 | 1 | Partial | Stack usage is one line every 5 minutes, a warning when a task has under 20 % free (`9f97ea9`), with the heap. The mutex leak in the gyro/accel tasks is fixed. Open: run-time stats and CPU %, cycle counters around `controller_update`, LED task stack (80 of 512 bytes free). |
 | T2.13 | 1 | Partial | Runs from the 16 MHz HSE with an HSI fallback (`2b0e064`); boots at 84 MHz. Open: power-cycle test, MCO measurement, load-cap decision (board has 15 pF caps, crystal wants 8 pF). |
 | T2.3 | 1 | Open | `wrap_to_pi` still `fmodf`-based (`[-π, π)`). |
 | T2.4 | 1 | Moot | `last_velocity` and `last_ticks` deleted with the software interpolation (T4.1, `cb73897`). |
@@ -116,7 +116,7 @@ been created (FreeRTOS heap full) and its blink never worked; both are fixed, se
 | T7.13 | 2 | Open | New, low priority. Byte stuffing in the library costs ~0.12 ms per bus transaction in the Debug build; do it in one pass. |
 | T7.5 | 3 | Partial | New. Slices 1 to 4 built and run on the robot: frames and CRC (`cmd_frame.c`), twist adapter with `T_LINK` (`command_adapter.c`), shared command state (`cmd_link.c`), 31-byte full-duplex SPI task in `main.c`, Pi side `SpiLink` in `poom-remote` at 200 kHz. Walk, stop, Poom out of range and daemon kill all stop the robot within 0.6 s. SPI1/USART1 interrupt priority 6 removed the servo 0 read timeouts. Open: walking test, heading lead fix, Poom firmware. Rotation blocked by a controller fault (rotate logic). The 7-byte frames of the old interface are gone. |
 | T5.1 | 4 | Open | Reach radius is a fixed 40 mm. |
-| T5.2 | 4 | Open | `attitude` still discarded (`(void)attitude`), the caller passes zeros. See [`frames-analysis.md`](frames-analysis.md). |
+| T5.2 | 4 | Open | `attitude` still discarded (`(void)attitude`), the caller passes zeros. The roll and pitch estimate itself was wrong at rest (accelerometer outliers from SPI2 at 21 MHz against a 10 MHz limit); gate added, clock fix pending. See the item and [`frames-analysis.md`](frames-analysis.md). |
 | T5.3 | 4 | Open | Open-loop body pose integration. |
 | T7.6 | 4 | Open | New. |
 | T7.7 | 4 | Open | New. |
@@ -587,6 +587,9 @@ stuffing checks below, and the units by the bench experiment (T7.14: velocity
 0.229 rpm per unit, position and velocity registers read consistently with the
 profile registers). The register addresses and units were confirmed on the robot.
 Left over: the rare read timeouts, see below.
+Since 2026-10-17 the read also returns the servo input voltage and temperature (registers 144 to
+146, 21 bytes per servo), reported as `[Servos]` every 30 s and, with the lowest voltage, in the
+failed read warning, to find out what the bursty timeouts correlate with.
 
 **What it does.** The servo task reads, for every servo, one contiguous block with
 `dynamixel_get_bytes_multiple` and publishes `load_pct[6][3]` (0.1 % units converted to
@@ -617,6 +620,17 @@ or alerts. Two findings:
   still always on servo 0. Setting the SPI1 and USART1 interrupt priorities to 6, below
   the servo bus handlers (`327a4d3`), brought them to 0 in 4,500 reads; the background
   rate of about 1 per 3,000 is probably still there (one in the boot window).
+  *Update 2026-10-17:* with the LED task running (new in that build) 3, 0, 4 and 3 failed
+  reads in the 30 s windows with the link on, all on servo 0. They are not tied to the LED blink
+  phase (concentration 0.16 against 0.32 for a uniform spread), and two of the ten happened before
+  the first SPI frame of the daemon, so neither the LED nor the SPI link is the cause. They come in
+  bursts that get denser with time: seven in the last 14 s before POWERDOWN. A supply that sags or a
+  servo that heats up would fit; the voltage and temperature read above is meant to show that.
+  *Result of the first run with it (2026-10-17, SPI2 slowed to 5.25 MHz in the same flash):* one
+  failed read in about 6,800, input 11.0 to 11.2 V and 36 to 38 C throughout, no burst. Two things
+  changed at once (the SPI2 clock, which also drives fast edges close to the servo bus, and the
+  time since the last battery change), so the cause of the earlier bursts is still open; keep the
+  `[Servos]` line in the walking test.
 
 Load observations, servo frame, % of maximum (design §7.1): standing, femur
 −11 to −20 and tibia −12 to +2; lifted, femur −3 to +3 and tibia −8 to 0. The
@@ -1002,6 +1016,23 @@ The sensing the motion core depends on: level frame from the IMU, ground contact
 **Effort:** L.
 **See also:** [`frames-analysis.md`](frames-analysis.md): how the frames are used today and
 what changes for world, level, body and leg.
+**Finding (2026-10-17): the attitude estimate cannot be trusted yet.** With the robot standing
+still the log shows EKF roll values of 0.34 to 0.75 rad. Cause: 7 of 10 accelerometer samples are
+wrong (one axis at 20 to 45 m/s2, the true values are 0, 0 and 9.8), also with the servos off, and
+the filter has no sanity check on them (gain about 0.12 per sample, so the roll settles on the
+weighted mean of the good and the bad samples). Likely origin: SPI2 runs at 21 MHz (APB1 42 MHz,
+prescaler 2), the BMI088 accelerometer and gyro are specified for at most 10 MHz. Done: samples whose
+length is not 1 g within 25 % are no longer used (`accel_gate.c`, host test replays the logged
+samples through the real filter: roll mean 0.43 rad without the check, 0.026 with it), the
+rejections are reported every 30 s (`[Accel]`), and the SPI mutex leak on failed reads is fixed.
+**Result (2026-10-17):** with SPI2 at prescaler 8 (5.25 MHz, `hspi2` in CubeMX) the accelerometer
+reads a steady (0.10, 0.15, 9.82) m/s2 at rest and `[Accel]` showed no rejection in five windows
+(1,890 samples; before: 7 of 10 samples wrong). The EKF reads roll 0.01 and pitch -0.01 rad instead
+of 0.34 to 0.75, which is what the accelerometer says (atan2(0.15, 9.83) = 0.015). The gate stays as a
+safety net and for the impacts of walking. Open: the same check while walking, the gyro with the
+slower clock (its offsets were not looked at), and the filter itself (Euler angle integration, gyro
+bias states that are never updated, yaw not wrapped), a candidate for replacement by a complementary
+filter in the rewrite.
 
 **Do.** Pre-multiply the body-to-world transform by the EKF's
 estimated roll/pitch before computing leg targets. The simplest

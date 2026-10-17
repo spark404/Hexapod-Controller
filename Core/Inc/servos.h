@@ -24,6 +24,8 @@ typedef struct {
     /* The servo's own profile: how far the position trails it, and its velocity */
     float32_t tracking_error_rad[6][3];       /* Position Trajectory - Present Position, rad */
     float32_t profile_velocity_radps[6][3];   /* Velocity Trajectory, rad/s, signed */
+    uint16_t input_voltage_dv[6][3];          /* Present Input Voltage, 0.1 V, 0 = not read yet */
+    uint8_t temperature_c[6][3];              /* Present Temperature, degrees C */
     bool initialized;
     bool request_powerdown;
     bool limit_alert_enabled;
@@ -58,6 +60,8 @@ void servo_copy_velocity(float32_t dst[6][3], const servo_shared_state_t *state)
 void servo_set_load_and_velocity(servo_shared_state_t *state, float32_t load[6][3], float32_t velocity[6][3]);
 void servo_copy_profile_tracking(float32_t error[6][3], float32_t velocity[6][3], const servo_shared_state_t *state);
 void servo_set_profile_tracking(servo_shared_state_t *state, float32_t error[6][3], float32_t velocity[6][3]);
+void servo_copy_health(uint16_t voltage_dv[6][3], uint8_t temperature_c[6][3], const servo_shared_state_t *state);
+void servo_set_health(servo_shared_state_t *state, uint16_t voltage_dv[6][3], uint8_t temperature_c[6][3]);
 void servo_get_flags(const servo_shared_state_t *state, bool *request_powerdown, bool *limit_alert_enabled);
 void servo_set_request_powerdown(servo_shared_state_t *state, bool request_powerdown);
 void servo_set_limit_alert_enabled(servo_shared_state_t *state, bool limit_alert_enabled);

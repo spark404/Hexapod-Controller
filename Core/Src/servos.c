@@ -154,6 +154,32 @@ void servo_set_load_and_velocity(servo_shared_state_t *state, float32_t load[6][
     taskEXIT_CRITICAL();
 }
 
+void servo_set_health(servo_shared_state_t *state, uint16_t voltage_dv[6][3], uint8_t temperature_c[6][3])
+{
+    taskENTER_CRITICAL();
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < 3; j++) {
+            if (voltage_dv[i][j] != 0) {     // a servo that did not answer keeps its last values
+                state->input_voltage_dv[i][j] = voltage_dv[i][j];
+                state->temperature_c[i][j] = temperature_c[i][j];
+            }
+        }
+    }
+    taskEXIT_CRITICAL();
+}
+
+void servo_copy_health(uint16_t voltage_dv[6][3], uint8_t temperature_c[6][3], const servo_shared_state_t *state)
+{
+    taskENTER_CRITICAL();
+    for (int i = 0; i < 6; i++) {
+        for (int j = 0; j < 3; j++) {
+            voltage_dv[i][j] = state->input_voltage_dv[i][j];
+            temperature_c[i][j] = state->temperature_c[i][j];
+        }
+    }
+    taskEXIT_CRITICAL();
+}
+
 void servo_copy_profile_tracking(float32_t error[6][3], float32_t velocity[6][3], const servo_shared_state_t *state)
 {
     taskENTER_CRITICAL();
