@@ -131,6 +131,87 @@ class Verdict(unittest.TestCase):
         self.assertEqual(v, "INCONCLUSIVE")
 
 
+def block(t, volt="11.0 to 11.2 V (lowest: servo 3), temperature up to 36 C (servo 1)", roll="0.01", pitch="-0.01",
+          accel="378 samples, none rejected", **bus_kw):
+    """One report block of the firmware, as it prints it after the [Bus] line"""
+    return console(
+        bus(t, **bus_kw),
+        f"{t + 0.02:.3f} [INFO] [Servos] input {volt}",
+        f"{t + 0.03:.3f} [INFO] [Sensors] gyr -0.01  0.00  0.00 | acc  0.09  0.15  9.83 | mag -5.63 28.25 38.55 | "
+        f"ekf roll {roll:>5} pitch {pitch:>5} yaw -1.79",
+        f"{t + 0.04:.3f} [INFO] [Accel] {accel}")
+
+
+class AttitudeAndHealth(unittest.TestCase):
+    def windows(self, *blocks, walks=()):
+        w, fatal = r.parse_console("".join(blocks))
+        r.build(w, list(walks), [])
+        return w, fatal
+
+    def test_the_lines_of_a_block_belong_to_its_window(self):
+        w, _ = self.windows(block(T0 + 30), block(T0 + 60, roll="-0.05", pitch="0.12",
+                                                  volt="10.8 to 11.1 V (lowest: servo 7), temperature up to 41 C (servo 12)",
+                                                  accel="4 of 380 samples rejected (length not 1 g +-2.5 m/s2), "
+                                                        "last bad raw 1 2 3, 22.1 m/s2"))
+        self.assertEqual((w[0]["roll"], w[0]["pitch"]), (0.01, -0.01))
+        self.assertEqual(w[0]["volt"], (110, 112, 3))
+        self.assertEqual(w[0]["temp"], (36, 1))
+        self.assertEqual((w[0]["acc_rej"], w[0]["acc_total"]), (0, 378))
+        self.assertEqual((w[1]["roll"], w[1]["pitch"]), (-0.05, 0.12))
+        self.assertEqual(w[1]["volt"], (108, 111, 7))
+        self.assertEqual(w[1]["temp"], (41, 12))
+        self.assertEqual((w[1]["acc_rej"], w[1]["acc_total"]), (4, 380))
+
+    def test_lines_far_from_a_bus_line_are_not_attached(self):
+        text = console(bus(T0 + 30), f"{T0 + 40:.3f} [INFO] [Accel] 378 samples, none rejected")
+        w, _ = r.parse_console(text)
+        self.assertIsNone(w[0]["acc_rej"])
+
+    def test_a_block_without_these_lines_still_parses(self):
+        w, _ = self.windows(console(bus(T0 + 30)))
+        self.assertEqual((w[0]["roll"], w[0]["volt"], w[0]["temp"], w[0]["acc_rej"]), (None, None, None, None))
+
+    def judge(self, windows, fatal=()):
+        return r.judge(windows, list(fatal), max_failures=1, max_spi_errors=3, min_walk_s=5.0, min_windows=1)
+
+    def test_servo_supply_and_temperature_fail_the_run(self):
+        walks = [(T0 + 35, T0 + 45)]
+        ok, _ = self.windows(block(T0 + 30), block(T0 + 60), walks=walks)
+        self.assertEqual(self.judge(ok)[0], "PASS")
+
+        low, _ = self.windows(block(T0 + 30), block(T0 + 60, volt="9.2 to 11.0 V (lowest: servo 5), "
+                                                                  "temperature up to 36 C (servo 1)"), walks=walks)
+        verdict, why = self.judge(low)
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn("9.2 V", why[0])
+
+        hot, _ = self.windows(block(T0 + 30), block(T0 + 60, volt="11.0 to 11.1 V (lowest: servo 2), "
+                                                                  "temperature up to 66 C (servo 9)"), walks=walks)
+        verdict, why = self.judge(hot)
+        self.assertEqual(verdict, "FAIL")
+        self.assertIn("66 C", why[0])
+
+    def test_notes_about_the_attitude_do_not_change_the_verdict(self):
+        walks = [(T0 + 35, T0 + 45)]
+        w, _ = self.windows(block(T0 + 30, roll="0.20", pitch="0.01"), block(T0 + 60, roll="0.30"),
+                            block(T0 + 90, accel="12 of 380 samples rejected (length not 1 g +-2.5 m/s2), "
+                                                 "last bad raw 1 2 3, 22.1 m/s2"), walks=walks)
+        notes = r.attitude_notes(w)
+        self.assertEqual(sum(1 for n in notes if n.startswith("standing, window")), 1)   # only the window at rest
+        self.assertTrue(any("12 of" in n and "rejected" in n for n in notes))
+        self.assertEqual(self.judge(w)[0], "PASS")
+
+    def test_tables_and_summary(self):
+        w, _ = self.windows(block(T0 + 30), block(T0 + 60, roll="0.10", pitch="-0.05"), walks=[(T0 + 40, T0 + 50)])
+        table = r.fmt_attitude_table(w, T0)
+        self.assertIn("roll deg", table)
+        self.assertIn("5.7", table)                      # 0.10 rad
+        self.assertIn("11.0-11.2", table)
+        self.assertIn("0 of 378", table)
+        text = r.summary(w)
+        self.assertIn("roll up to 5.7 deg", text)
+
+
 class Command(unittest.TestCase):
     def test_exit_codes_and_output(self):
         with tempfile.TemporaryDirectory() as d:

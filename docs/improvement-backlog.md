@@ -44,7 +44,7 @@ motion-profile work (T4.x) is specified in
 | Phase | Theme | Active items |
 |------:|-------|-------------:|
 | 1 | Foundations and safety | 14 (1 done, 1 moot) |
-| 2 | Servo bus and actuation | 10 (2 done) |
+| 2 | Servo bus and actuation | 11 (2 done) |
 | 3 | Command interface | 1 |
 | 4 | Frames, sensing and contact | 5 |
 | 5 | Motion core | 4 |
@@ -110,6 +110,7 @@ been created (FreeRTOS heap full) and its blink never worked; both are fixed, se
 | T7.2 | 2 | Open | New. |
 | T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
 | T7.4 | 2 | Done | New. Load, velocity and position are read in one Sync Read (now 18 bytes, see the item) and published (`f1f0a2c`). Verified on the robot: values and timing as expected, units confirmed by the bench experiment, byte stuffing fixed (library `0a49c5c`, 0 failures in 2,950 reads). Left over: the rare read timeout (about 1 per 3,000 cycles); it rose to 2-5 per 30 s when the SPI link started and went away with the interrupt priority change (T7.5). |
+| T7.17 | 2 | Open | New, 2026-10-26. The servo bus locked up once during the walking test: servo 0 stopped answering and the receiver was flooded; the UART reset did not clear it, only a power cycle did. Find the cause and add a recovery. |
 | T7.16 | 2 | Open | New, next after T4.1/T4.2 are seen on the robot. Write the goals when the controller publishes, not on the next 50 Hz servo tick. |
 | T7.15 | 2 | Open | New, from the first bench data. A loaded leg lags its servo profile by ~100 ms and stops short of the goal: tune the position controller. |
 | T7.14 | 2 | Done | New. Bench experiment for the servo profile mode: all 103 runs on the robot, 2026-10-12. Result in [plan §6.3](servo-profile-bench-experiment.md): velocity-based computed profile if profiles are used, no sync benefit, servo lag is the issue (T7.15). |
@@ -927,6 +928,83 @@ proportionally (or fault if it's already at minimum).
 - *Bench:* T2.12 shows control task CPU and period jitter within budget.
 - *Walk:* 50 mm/s on a tape-measured line gives the same distance as at 10 Hz.
 
+
+### T7.17 — Servo bus lock-up: servo 0 silent, receiver flooded
+
+**Source:** walking test with bus diagnostics, 2026-10-26 (`link-walk-20261026-193620`).
+**Effort:** M (diagnosis first).
+**Depends on:** T7.12 (diagnostics), T7.4 (per-servo reads).
+
+**What happened.** The first run of the walking test stood for 80 s with the usual
+background (6 servo 0 timeouts in 3,000 reads, each cleared by the UART reset), then at
+1793039881.9 every read failed and kept failing for the remaining 130 s, standing and
+walking. The robot was commanded and walked on, because writes kept succeeding
+(`wr ok 300 of 300` in every window); only the state reads were lost, so the controller
+walked on stale joint angles with no voltage or temperature updates. Nothing else in the
+firmware noticed. After a power cycle of the MCU (GPIO22) the second run was clean
+(2 failures in 10,500 reads, PASS).
+
+**What the log shows.**
+- The failure is servo 0 first: it is missing in 1,500 of 1,500 reads per window; servos
+  1 to 17 also fail, but in only 15 % of the reads (221 of 1,500 in the first full window,
+  119 in the next). So the bus mostly carries the replies of 17 healthy servos, and
+  servo 0 (the first reply of the Sync Read) is absent or unreadable. Servo 0 also owned
+  every background timeout before the lock-up (`0:1`, `0:5`, and earlier `0:142` from the
+  first window of the onset).
+- The error codes cycle in a fixed pattern: 8 or 9 reads with 68 (`DNM_LL_ERR`, UART
+  reset), 7 with 70 (no reset), one with 65, then 68 again; about 20 ms per read, so the
+  pattern repeats every 16 cycles. 70 is not one of the library's codes (`DNM_*` ends at 69); where it
+  comes from is to be found.
+- **The receiver is flooded.** `rx dropped` is 733 kB in the 30 s window (24 kB/s): the
+  4,096-byte ring overflows in every cycle although a complete reply is only about 570 B.
+  Several kB arrive per cycle on a line that carries a ~570 B reply, with no UART
+  errors at all (`ore fe ne pe dma` all 0): valid frames at near line rate.
+- Voltage 10.8 to 11.1 V and temperature 34 C throughout; no servo hardware alert
+  (`servo alerts 0`); loop overruns 0; the SPI link and everything else were fine.
+- The UART reset sequence (stop DMA, flush, restart) was executed about 1,400 times per
+  window and never cleared it, so the source is outside the receiver state we reset.
+
+**Hypotheses, most likely first.**
+1. Servo 0 (or something on the bus next to it) transmits continuously or repeatedly
+   after a bad packet, for example after a corrupted request or a late TX/RX switch, which
+   also explains why a power cycle of the MCU, which re-runs `PERIF_Dynamixel_Configure`,
+   cleared it (it re-sends return delay, operating mode and the rest to every servo).
+2. The first-reply race: with a 20 us return delay, the receiver is armed in the TX
+   complete interrupt (`HAL_UART_TxCpltCallback`); an interrupt that holds off that
+   callback longer than 20 us loses the start of servo 0's reply. This explains the
+   background timeouts (only servo 0, 1 in 3,000), but not a permanent state.
+3. A wiring or connector fault at servo 0 (first in the chain): intermittent contact
+   gives the background timeouts and, once, a stuck state. Check by a wiggle test and
+   by reading the error counters of the bus when only servo 0 is connected.
+4. A bug in the receive path: the drain of the DMA buffer takes its write index outside
+   the critical section (`uart_rx_drain_dma`), and a reset in between replays up to 1,023
+   stale bytes; each replay corrupts the next read, which triggers another reset. This
+   could keep a failure going but does not explain several kB per cycle, so it is
+   a contributor at most. Fix anyway.
+
+**Do.**
+1. *Capture before the reset:* when a read fails with `DNM_LL_ERR` N times in a row
+   (say 5), log the first 32 bytes of the receive ring once, the hardware error status
+   (register 70) of servo 0 by an individual read, and a ping of servo 0 and of servo 1.
+   That separates a babbling servo from a receiver problem in one event.
+2. *Recover:* after N failed reads in a row, run the configure sequence again, then
+   reboot servo 0 (instruction 0x08) if it is still silent, and raise the fault to the
+   controller (T1.2) if that does not help within a second. Never keep walking on reads
+   that are 100 % stale: publish a `servo_read_ok` age so the controller can stop.
+3. *Race fix:* snapshot the write index inside the critical section in
+   `uart_rx_drain_dma`; keep the reset and the drain mutually exclusive.
+4. *Reproduce:* repeat the walking test a few times, and a long standing test (an hour),
+   to see how often it happens. With the capture from step 1 in place, one event is enough.
+
+**Verify.**
+- *Bench:* force the failure (pull and reconnect the data line of servo 0 while the
+  firmware runs): the recovery brings the reads back within a second, or raises a
+  fault; no silent stale walking.
+- *Walk:* the walking test passes five times in a row with the report's FAIL criteria
+  unchanged.
+
+**Left from the test.** The report tool now reads the windows without any good read
+(`rd 1500 ok 0 (us -)`); before, it skipped them and called the run INCONCLUSIVE.
 
 ---
 
