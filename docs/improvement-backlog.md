@@ -953,8 +953,10 @@ firmware noticed. After a power cycle of the MCU (GPIO22) the second run was cle
   first window of the onset).
 - The error codes cycle in a fixed pattern: 8 or 9 reads with 68 (`DNM_LL_ERR`, UART
   reset), 7 with 70 (no reset), one with 65, then 68 again; about 20 ms per read, so the
-  pattern repeats every 16 cycles. 70 is not one of the library's codes (`DNM_*` ends at 69); where it
-  comes from is to be found.
+  pattern repeats every 16 cycles. 70 is `DNM_RECV_ID_MISMATCH` (library `dynamixel_error.h`): a reply came
+  from a different servo than the one asked for. So replies did arrive, from servos
+  other than the one the Sync Read expected at that position; with servo 0 silent the
+  next servo answers into its slot.
 - **The receiver is flooded.** `rx dropped` is 733 kB in the 30 s window (24 kB/s): the
   4,096-byte ring overflows in every cycle although a complete reply is only about 570 B.
   Several kB arrive per cycle on a line that carries a ~570 B reply, with no UART
@@ -982,8 +984,11 @@ firmware noticed. After a power cycle of the MCU (GPIO22) the second run was cle
    could keep a failure going but does not explain several kB per cycle, so it is
    a contributor at most. Fix anyway.
 
+**Status 2026-10-26:** step 1 is implemented (`bus_capture.c`, host test
+`tests/bus_capture_test.c`, in the servo task); not flashed yet. Steps 2 to 4 are open.
+
 **Do.**
-1. *Capture before the reset:* when a read fails with `DNM_LL_ERR` N times in a row
+1. *Capture before the reset (done):* when a read fails with `DNM_LL_ERR` N times in a row
    (say 5), log the first 32 bytes of the receive ring once, the hardware error status
    (register 70) of servo 0 by an individual read, and a ping of servo 0 and of servo 1.
    That separates a babbling servo from a receiver problem in one event.

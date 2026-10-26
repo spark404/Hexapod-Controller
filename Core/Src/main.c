@@ -42,6 +42,7 @@
 #include "cmd_link.h"
 #include "periodic.h"
 #include "accel_gate.h"
+#include "bus_capture.h"
 #include "command_adapter.h"
 
 #include "dynamixel/dynamixel.h"
@@ -1816,6 +1817,51 @@ static void uart_rx_reset_dma(void)
     osMutexRelease(uart_dma_mutexHandle);
 }
 
+#define BUS_CAPTURE_BYTES 32U           /* bytes of the receive ring shown in the log */
+#define BUS_CAPTURE_AFTER_FAILS 5U      /* failed reads in a row before the first capture (100 ms) */
+#define BUS_CAPTURE_REPEAT_FAILS 250U   /* then every 5 s while the reads keep failing */
+#define BUS_CAPTURE_LISTEN_MS 20U
+
+/** Take up to BUS_CAPTURE_BYTES from the receive ring and log them with what was in it (T7.17). */
+static void servo_bus_capture_ring(const char *what)
+{
+    uint8_t bytes[BUS_CAPTURE_BYTES];
+    char text[BUS_CAPTURE_BYTES * 3U];
+
+    taskENTER_CRITICAL();
+    const size_t held = ringbuf_available(&rx_ring);
+    const size_t n = ringbuf_read(&rx_ring, bytes, sizeof(bytes));
+    taskEXIT_CRITICAL();
+
+    bus_capture_hex(text, sizeof(text), bytes, n);
+    LOG_WARN("[BusCapture] %s: %u B in the receive ring, first %u: %s", what, (unsigned) held, (unsigned) n, text);
+}
+
+/**
+ * The servo reads have failed for a while (T7.17). Called after the UART receiver was reset, so the
+ * ring is empty. First, listen on the line without sending anything: bytes arriving then come from
+ * a servo that talks on its own (or from noise). Then ask servos 0 and 1 for a ping and servo 0 for
+ * its hardware error status, one at a time, which tells a dead servo from a damaged reply.
+ */
+static void servo_bus_capture_probe(void)
+{
+    osDelay(BUS_CAPTURE_LISTEN_MS);
+    servo_bus_capture_ring("line idle for 20 ms");
+    uart_rx_reset_dma();
+
+    const dynamixel_result_t ping0 = dynamixel_ping(&dynamixel_servos[0]);
+    uart_rx_reset_dma();
+    const dynamixel_result_t ping1 = dynamixel_ping(&dynamixel_servos[1]);
+    uart_rx_reset_dma();
+    uint8_t hardware_error = 0;
+    const dynamixel_result_t status0 =
+        dynamixel_get_byte_parameter(&dynamixel_servos[0], XL430_CT_RAM_HARDWARE_ERR_STATUS, &hardware_error);
+    uart_rx_reset_dma();
+
+    LOG_WARN("[BusCapture] ping servo 0: %u, ping servo 1: %u, hardware error status servo 0: %u (0x%02x)",
+             (unsigned) ping0, (unsigned) ping1, (unsigned) status0, (unsigned) hardware_error);
+}
+
 ssize_t dynamixel_read_uart_dma(
     uint8_t *rxBuffer,
     size_t size,
@@ -2954,6 +3000,10 @@ void StartServoTask(void *argument)
     servo_read_t servo_read = {0};
     float32_t servo_angles_rad[6][3] = {{0.0f}};   // servo frame, before compensate()
 
+    // Evidence for a bus that stays broken (T7.17)
+    bus_capture_t capture;
+    bus_capture_init(&capture, BUS_CAPTURE_AFTER_FAILS, BUS_CAPTURE_REPEAT_FAILS);
+
     osEventFlagsWait(systemEventsHandle, EVT_UART_READY, osFlagsWaitAll, osWaitForever);
 
     uint32_t tick_count = osKernelGetTickCount();
@@ -3036,6 +3086,7 @@ void StartServoTask(void *argument)
             //    - Compensate for geometry
             //    A servo that did not answer keeps its last known position
             const dynamixel_result_t res = servo_bus_read_state(&servo_read);
+            const bool capture_now = bus_capture_update(&capture, res != DNM_OK);
             for (int i=0; i<6; i++) {
                 for (int j=0; j<3; j++) {
                     if (servo_read.valid[i][j]) {
@@ -3060,7 +3111,15 @@ void StartServoTask(void *argument)
 
                     // Perform DMA recovery (mutex-protected)
                     bus_diag_event(BUS_EV_RESET_READ_FAIL, 1);
+                    if (capture_now) {
+                        servo_bus_capture_ring("after the failed read");
+                    }
                     uart_rx_reset_dma();
+                }
+                if (capture_now) {
+                    LOG_WARN("[BusCapture] %u failed reads in a row, last result %u",
+                             (unsigned) capture.streak, (unsigned) res);
+                    servo_bus_capture_probe();
                 }
                 // Damaged replies were read in full, the receiver is still in step
             };

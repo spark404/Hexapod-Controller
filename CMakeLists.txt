@@ -80,6 +80,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
         Core/Src/attitude_ekf.c
         Core/Src/ring_buffer.c
         Core/Src/bus_diag.c
+        Core/Src/bus_capture.c
         Core/Src/log_sink.c
         Core/Src/cmd_frame.c
         Core/Src/command_adapter.c
