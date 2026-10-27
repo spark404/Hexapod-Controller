@@ -131,6 +131,70 @@ static void test_window_reset_and_deltas(void)
     assert(strstr(rep.boot, "rd failed 1/4") != NULL);
 }
 
+static void test_turnaround(void)
+{
+    bus_diag_init();
+    bus_diag_snapshot_t prev, cur, next;
+    bus_diag_report_t rep;
+    bus_diag_snapshot(&prev, true);
+
+    /* no transmit in the window */
+    bus_diag_snapshot(&cur, true);
+    bus_diag_format(&prev, &cur, 30, &rep);
+    assert(strstr(rep.summary, "| turnaround us - slow 0") != NULL);
+    assert(!rep.window_errors);
+
+    /* within the limit: reported, but not an error */
+    bus_diag_turnaround(3);
+    bus_diag_turnaround(5);
+    bus_diag_turnaround(BUS_DIAG_TURNAROUND_LIMIT_US);
+    bus_diag_snapshot(&next, true);
+    bus_diag_format(&cur, &next, 30, &rep);
+    assert(strstr(rep.summary, "| turnaround us 3/7/15 slow 0") != NULL);
+    assert(!rep.window_errors);
+
+    /* above the limit: counted as slow, the window has errors; min and max start over */
+    bus_diag_turnaround(4);
+    bus_diag_turnaround(BUS_DIAG_TURNAROUND_LIMIT_US + 1);
+    bus_diag_turnaround(340);
+    bus_diag_snapshot(&prev, true);
+    bus_diag_format(&next, &prev, 30, &rep);
+    assert(strstr(rep.summary, "| turnaround us 4/120/340 slow 2") != NULL);
+    assert(rep.window_errors);
+}
+
+static void test_stale_bytes_and_skipped_writes(void)
+{
+    bus_diag_init();
+    bus_diag_snapshot_t prev, cur;
+    bus_diag_report_t rep;
+    bus_diag_snapshot(&prev, true);
+
+    bus_diag_event(BUS_EV_RX_STALE, 570);
+    bus_diag_event(BUS_EV_RX_STALE, 43);
+    bus_diag_event(BUS_EV_WR_SKIP_BUSY, 2);
+    bus_diag_snapshot(&cur, true);
+    bus_diag_format(&prev, &cur, 30, &rep);
+
+    assert(rep.window_errors);
+    assert(strstr(rep.transport, "| rx stale 613 B | wr skipped busy 2") != NULL);
+    /* the longest transport line still fits */
+    assert(strlen(rep.transport) < sizeof(rep.transport) - 1);
+}
+
+static void test_longest_transport_line_fits(void)
+{
+    bus_diag_snapshot_t prev, cur;
+    bus_diag_report_t rep;
+    memset(&prev, 0, sizeof(prev));
+    memset(&cur, 0, sizeof(cur));
+    for (int e = 0; e < BUS_EV_COUNT; e++) {
+        cur.events[e] = UINT32_MAX;
+    }
+    bus_diag_format(&prev, &cur, 30, &rep);
+    assert(strstr(rep.transport, "wr skipped busy 4294967295") != NULL);
+}
+
 static void test_counter_wrap(void)
 {
     bus_diag_snapshot_t prev, cur;
@@ -160,6 +224,9 @@ int main(void)
     test_new_result_codes_and_servo_attribution();
     test_window_reset_and_deltas();
     test_counter_wrap();
+    test_turnaround();
+    test_stale_bytes_and_skipped_writes();
+    test_longest_transport_line_fits();
     printf("bus_diag: all tests passed\n");
     return 0;
 }

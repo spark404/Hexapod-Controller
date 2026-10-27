@@ -17,6 +17,10 @@ typedef struct {
     uint32_t time_max_us[BUS_OP_COUNT];
     uint32_t events[BUS_EV_COUNT];
     uint32_t servo_fail[BUS_DIAG_MAX_SERVOS];
+    uint32_t turnaround_count;
+    uint32_t turnaround_sum_us;
+    uint32_t turnaround_min_us;
+    uint32_t turnaround_max_us;
     uint32_t max_streak;
     uint32_t last_error;
 } bus_diag_state_t;
@@ -66,6 +70,7 @@ void bus_diag_init(void)
     for (int op = 0; op < BUS_OP_COUNT; op++) {
         g_diag.time_min_us[op] = UINT32_MAX;
     }
+    g_diag.turnaround_min_us = UINT32_MAX;
     g_streak = 0;
 }
 
@@ -106,6 +111,17 @@ void bus_diag_event(const bus_event_t ev, const uint32_t n)
     atomic_add(&g_diag.events[ev], n);
 }
 
+void bus_diag_turnaround(const uint32_t us)
+{
+    atomic_add(&g_diag.turnaround_count, 1);
+    atomic_add(&g_diag.turnaround_sum_us, us);
+    atomic_min(&g_diag.turnaround_min_us, us);
+    atomic_max(&g_diag.turnaround_max_us, us);
+    if (us > BUS_DIAG_TURNAROUND_LIMIT_US) {
+        atomic_add(&g_diag.events[BUS_EV_TURNAROUND_SLOW], 1);
+    }
+}
+
 void bus_diag_snapshot(bus_diag_snapshot_t *out, const bool reset_window)
 {
     for (int op = 0; op < BUS_OP_COUNT; op++) {
@@ -127,10 +143,16 @@ void bus_diag_snapshot(bus_diag_snapshot_t *out, const bool reset_window)
     for (int s = 0; s < BUS_DIAG_MAX_SERVOS; s++) {
         out->servo_fail[s] = __atomic_load_n(&g_diag.servo_fail[s], RELAXED);
     }
+    out->turnaround_count = __atomic_load_n(&g_diag.turnaround_count, RELAXED);
+    out->turnaround_sum_us = __atomic_load_n(&g_diag.turnaround_sum_us, RELAXED);
     if (reset_window) {
         out->max_streak = __atomic_exchange_n(&g_diag.max_streak, 0U, RELAXED);
+        out->turnaround_min_us = __atomic_exchange_n(&g_diag.turnaround_min_us, UINT32_MAX, RELAXED);
+        out->turnaround_max_us = __atomic_exchange_n(&g_diag.turnaround_max_us, 0U, RELAXED);
     } else {
         out->max_streak = __atomic_load_n(&g_diag.max_streak, RELAXED);
+        out->turnaround_min_us = __atomic_load_n(&g_diag.turnaround_min_us, RELAXED);
+        out->turnaround_max_us = __atomic_load_n(&g_diag.turnaround_max_us, RELAXED);
     }
     out->last_error = __atomic_load_n(&g_diag.last_error, RELAXED);
 }
@@ -178,6 +200,20 @@ static void format_timing(char *buf, const size_t size, const bus_diag_snapshot_
              (unsigned long) cur->time_min_us[op], (unsigned long) avg, (unsigned long) cur->time_max_us[op]);
 }
 
+/* "min/avg/max" in microseconds of the transmit to receive turnarounds of one window */
+static void format_turnaround(char *buf, const size_t size, const bus_diag_snapshot_t *prev,
+                              const bus_diag_snapshot_t *cur)
+{
+    const uint32_t n = delta(cur->turnaround_count, prev->turnaround_count);
+    if (n == 0) {
+        snprintf(buf, size, "-");
+        return;
+    }
+    const uint32_t avg = delta(cur->turnaround_sum_us, prev->turnaround_sum_us) / n;
+    snprintf(buf, size, "%lu/%lu/%lu",
+             (unsigned long) cur->turnaround_min_us, (unsigned long) avg, (unsigned long) cur->turnaround_max_us);
+}
+
 #define D(field) ((unsigned long) delta(cur->field, prev->field))
 #define DR(op, r) ((unsigned long) delta(cur->res[op][r], prev->res[op][r]))
 #define DE(e) ((unsigned long) delta(cur->events[e], prev->events[e]))
@@ -189,8 +225,10 @@ void bus_diag_format(const bus_diag_snapshot_t *prev, const bus_diag_snapshot_t 
 
     char rd_us[32];
     char wr_us[32];
+    char ta_us[32];
     format_timing(rd_us, sizeof(rd_us), prev, cur, BUS_OP_READ_STATE);
     format_timing(wr_us, sizeof(wr_us), prev, cur, BUS_OP_WRITE_GOAL);
+    format_turnaround(ta_us, sizeof(ta_us), prev, cur);
 
     const uint32_t rd_n = delta(res_total(cur, BUS_OP_READ_STATE), res_total(prev, BUS_OP_READ_STATE));
     const uint32_t wr_n = delta(res_total(cur, BUS_OP_WRITE_GOAL), res_total(prev, BUS_OP_WRITE_GOAL));
@@ -204,11 +242,13 @@ void bus_diag_format(const bus_diag_snapshot_t *prev, const bus_diag_snapshot_t 
     out->window_errors = (rd_fail + wr_fail + events_in_window) != 0;
 
     snprintf(out->summary, sizeof(out->summary),
-             "[Bus] %lus: rd %lu ok %lu (us %s) | wr %lu ok %lu (us %s) | max fail streak %lu | loop overruns %lu",
+             "[Bus] %lus: rd %lu ok %lu (us %s) | wr %lu ok %lu (us %s) | max fail streak %lu | loop overruns %lu"
+             " | turnaround us %s slow %lu",
              (unsigned long) window_s,
              (unsigned long) rd_n, (unsigned long) (rd_n - rd_fail), rd_us,
              (unsigned long) wr_n, (unsigned long) (wr_n - wr_fail), wr_us,
-             (unsigned long) cur->max_streak, DE(BUS_EV_LOOP_OVERRUN));
+             (unsigned long) cur->max_streak, DE(BUS_EV_LOOP_OVERRUN),
+             ta_us, DE(BUS_EV_TURNAROUND_SLOW));
 
     if (out->window_errors) {
         snprintf(out->protocol, sizeof(out->protocol),
@@ -226,12 +266,14 @@ void bus_diag_format(const bus_diag_snapshot_t *prev, const bus_diag_snapshot_t 
         snprintf(out->transport, sizeof(out->transport),
                  "[Bus] io: rd mutex %lu empty %lu partial %lu | wr mutex %lu txq %lu txtmo %lu"
                  " | uart ore %lu fe %lu ne %lu pe %lu dma %lu | rx dropped %lu B"
-                 " | dma resets: after read %lu, after uart err %lu | servo alerts %lu",
+                 " | dma resets: after read %lu, after uart err %lu | servo alerts %lu"
+                 " | rx stale %lu B | wr skipped busy %lu",
                  DE(BUS_EV_RD_MUTEX_TMO), DE(BUS_EV_RD_EMPTY), DE(BUS_EV_RD_PARTIAL),
                  DE(BUS_EV_WR_MUTEX_TMO), DE(BUS_EV_WR_TXQ_FULL), DE(BUS_EV_WR_TX_TMO),
                  DE(BUS_EV_UART_ORE), DE(BUS_EV_UART_FE), DE(BUS_EV_UART_NE), DE(BUS_EV_UART_PE),
                  DE(BUS_EV_UART_DMA), DE(BUS_EV_RX_DROP),
-                 DE(BUS_EV_RESET_READ_FAIL), DE(BUS_EV_RESET_UART_ERR), DE(BUS_EV_SERVO_ALERT));
+                 DE(BUS_EV_RESET_READ_FAIL), DE(BUS_EV_RESET_UART_ERR), DE(BUS_EV_SERVO_ALERT),
+                 DE(BUS_EV_RX_STALE), DE(BUS_EV_WR_SKIP_BUSY));
     }
 
     /* Which servos did not give data in this window, only worth a line when one failed */

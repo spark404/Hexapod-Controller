@@ -27,6 +27,10 @@
 /* Servos on the bus. Failures are counted per servo index (leg * 3 + joint). */
 #define BUS_DIAG_MAX_SERVOS 18
 
+/* The first servo replies one Return Delay Time (20 us) after a request; the receiver has to be
+ * armed before that. A turnaround above this limit is counted as slow (T7.17). */
+#define BUS_DIAG_TURNAROUND_LIMIT_US 15U
+
 /* Transactions that are timed and counted per operation */
 typedef enum {
     BUS_OP_READ_STATE = 0,  /* Sync Read of Present Load, Velocity and Position */
@@ -66,6 +70,9 @@ typedef enum {
     BUS_EV_RESET_UART_ERR,   /* RX DMA reset after a UART error */
     BUS_EV_SERVO_ALERT,      /* servo reported a hardware alert in a read (the data is valid) */
     BUS_EV_LOOP_OVERRUN,     /* servo loop iteration took longer than its period */
+    BUS_EV_RX_STALE,         /* bytes in the receiver when a request was sent, cleared (counts bytes) */
+    BUS_EV_WR_SKIP_BUSY,     /* goal write skipped: the bus did not go quiet after a failed read */
+    BUS_EV_TURNAROUND_SLOW,  /* receiver armed more than BUS_DIAG_TURNAROUND_LIMIT_US after a transmit */
     BUS_EV_COUNT
 } bus_event_t;
 
@@ -78,6 +85,10 @@ typedef struct {
     uint32_t time_max_us[BUS_OP_COUNT];
     uint32_t events[BUS_EV_COUNT];
     uint32_t servo_fail[BUS_DIAG_MAX_SERVOS]; /* reads without data, per servo index */
+    uint32_t turnaround_count;              /* transmits whose turnaround was measured */
+    uint32_t turnaround_sum_us;
+    uint32_t turnaround_min_us;             /* UINT32_MAX when none */
+    uint32_t turnaround_max_us;
     uint32_t max_streak;                    /* longest run of failed transactions */
     uint32_t last_error;                    /* last non-zero dynamixel result code */
 } bus_diag_snapshot_t;
@@ -86,7 +97,7 @@ typedef struct {
 typedef struct {
     char summary[224];      /* always filled */
     char protocol[224];     /* per result code detail, only with errors in the window */
-    char transport[224];    /* transport and UART detail, only with errors in the window */
+    char transport[384];    /* transport and UART detail, only with errors in the window */
     char servos[160];       /* failed reads per servo, only when a servo failed in the window */
     char boot[160];         /* totals since boot, only when any error happened */
     bool window_errors;     /* any failure or event in the window */
@@ -106,8 +117,12 @@ void bus_diag_servo_failure(unsigned servo_index);
 /* Add n occurrences of an event */
 void bus_diag_event(bus_event_t ev, uint32_t n);
 
+/* Record the time from the end of a transmit to the receiver being armed again. Safe from an
+ * interrupt handler. Above BUS_DIAG_TURNAROUND_LIMIT_US it also counts BUS_EV_TURNAROUND_SLOW. */
+void bus_diag_turnaround(uint32_t us);
+
 /* Copy the counters. With reset_window the window statistics (min, max,
- * streak) are cleared after being copied. */
+ * streak, turnaround min and max) are cleared after being copied. */
 void bus_diag_snapshot(bus_diag_snapshot_t *out, bool reset_window);
 
 /* Build the report for the window between prev and cur. Counter differences

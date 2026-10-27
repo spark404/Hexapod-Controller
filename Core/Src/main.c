@@ -363,6 +363,10 @@ static uint8_t rx_ring_buffer[RX_RING_SIZE];
 static ringbuf_t rx_ring;
 static size_t dma_rx_read_idx = 0;
 
+// Start of the transmit in flight on the servo bus, for the turnaround measurement (T7.17)
+static volatile uint32_t servo_tx_start_cycles;
+static volatile uint32_t servo_tx_len;
+
 servo_shared_state_t servo_shared_state;
 
 /* USER CODE END PV */
@@ -1596,6 +1600,15 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
     HAL_HalfDuplex_EnableReceiver(huart);
     HAL_UART_Receive_DMA(huart, dma_rx_buf, DMA_RX_BUF_SIZE);
 
+    // Turnaround: from the end of the last stop bit to here, the receiver armed. The end of the
+    // transmit is its start plus the bytes on the wire (10 bits each); the start is taken right
+    // after the DMA was started (T7.17)
+    const uint32_t elapsed_cycles = DWT->CYCCNT - servo_tx_start_cycles;
+    const uint32_t wire_cycles = servo_tx_len * 10U * (SystemCoreClock / huart->Init.BaudRate);
+    const uint32_t cycles_per_us = SystemCoreClock / 1000000U;
+    const uint32_t turnaround_cycles = elapsed_cycles > wire_cycles ? elapsed_cycles - wire_cycles : 0U;
+    bus_diag_turnaround((turnaround_cycles + cycles_per_us - 1U) / cycles_per_us);
+
     // osThreadFlagsSet internally handles context switching from ISR
     osThreadFlagsSet(usartTxTaskHandle, TX_DMA_TC);
 }
@@ -1759,9 +1772,12 @@ static void uart_rx_drain_dma(void)
 {
     bool pushed = false;
     uint32_t dropped = 0;
-    size_t write = dma_rx_write_idx();
 
+    // Take the write index in the same critical section as the read index: the TX task and
+    // uart_rx_reset_dma() restart the DMA and set both to 0, and a write index from before that
+    // would replay old bytes of dma_rx_buf (T7.17).
     taskENTER_CRITICAL();
+    const size_t write = dma_rx_write_idx();
     while (dma_rx_read_idx != write) {
         uint8_t b = dma_rx_buf[dma_rx_read_idx];
         dma_rx_read_idx = (dma_rx_read_idx + 1) % DMA_RX_BUF_SIZE;
@@ -1860,6 +1876,36 @@ static void servo_bus_capture_probe(void)
 
     LOG_WARN("[BusCapture] ping servo 0: %u, ping servo 1: %u, hardware error status servo 0: %u (0x%02x)",
              (unsigned) ping0, (unsigned) ping1, (unsigned) status0, (unsigned) hardware_error);
+}
+
+#define BUS_QUIET_US 1000U          /* no byte for this long: the replies are over (gaps are ~75 us) */
+#define BUS_QUIET_MAX_MS 6U         /* a full Sync Read reply takes ~4.5 ms; later bytes are not replies */
+
+/**
+ * After a read that did not end cleanly, servos may still be replying (T7.17). The bus is half
+ * duplex: writing now would collide with them. Wait until no byte has arrived for BUS_QUIET_US,
+ * at most BUS_QUIET_MAX_MS. Returns false when the line did not go quiet: a servo is talking
+ * unasked, and the caller must not write.
+ */
+static bool servo_bus_wait_quiet(void)
+{
+    const uint32_t cycles_per_us = SystemCoreClock / 1000000U;
+    const uint32_t start = DWT->CYCCNT;
+    uint32_t last_change = start;
+    size_t last_idx = dma_rx_write_idx();
+
+    while ((DWT->CYCCNT - start) / cycles_per_us < BUS_QUIET_MAX_MS * 1000U) {
+        osDelay(1);
+        const uint32_t now = DWT->CYCCNT;
+        const size_t idx = dma_rx_write_idx();
+        if (idx != last_idx) {
+            last_idx = idx;
+            last_change = now;
+        } else if ((now - last_change) / cycles_per_us >= BUS_QUIET_US) {
+            return true;
+        }
+    }
+    return false;
 }
 
 ssize_t dynamixel_read_uart_dma(
@@ -2811,11 +2857,19 @@ void StartUsartTxTask(void *argument)
             LOG_ERROR("[USARTTX] Failed to stop receiver");
         };
 
-        // Reset for next interation
+        // Reset for next interation. Nothing received before this request can be a reply to it:
+        // clear the receive ring too, and count what was there, received but not yet read
+        // (late replies or a servo talking unasked, T7.17)
         taskENTER_CRITICAL();
+        const size_t undrained = (dma_rx_write_idx() + DMA_RX_BUF_SIZE - dma_rx_read_idx) % DMA_RX_BUF_SIZE;
+        const size_t stale = ringbuf_available(&rx_ring) + undrained;
+        ringbuf_reset(&rx_ring);
         dma_rx_read_idx = 0;
         huart->hdmarx->Instance->NDTR = DMA_RX_BUF_SIZE;
         taskEXIT_CRITICAL();
+        if (stale > 0) {
+            bus_diag_event(BUS_EV_RX_STALE, (uint32_t) stale);
+        }
 
         // Enable Transmit
         if (HAL_HalfDuplex_EnableTransmitter(huart) != HAL_OK) {
@@ -2828,8 +2882,14 @@ void StartUsartTxTask(void *argument)
         // Start the transfer. HAL_UART_TxCpltCallback fires from the TC IRQ
         // when the line is physically idle and rearms the receiver before
         // setting TX_DMA_TC, so by the time we wake up RX DMA is already
-        // running.
-        if (HAL_UART_Transmit_DMA(huart, msg.data, msg.len) != HAL_OK) {
+        // running. The start time for the turnaround is taken in the same critical section, so
+        // a preemption cannot make it late (and the turnaround short).
+        servo_tx_len = msg.len;
+        taskENTER_CRITICAL();
+        const HAL_StatusTypeDef tx_started = HAL_UART_Transmit_DMA(huart, msg.data, msg.len);
+        servo_tx_start_cycles = DWT->CYCCNT;
+        taskEXIT_CRITICAL();
+        if (tx_started != HAL_OK) {
             LOG_ERROR("[USARTTX] Failed to start transfer");
         };
 
@@ -3099,16 +3159,17 @@ void StartServoTask(void *argument)
             servo_set_profile_tracking(&servo_shared_state, servo_read.tracking_error, servo_read.profile_velocity);
             servo_set_health(&servo_shared_state, servo_read.voltage_dv, servo_read.temperature_c);
 
+            bool bus_quiet = true;
             if (res != DNM_OK) {
                 LOG_WARN("[ServoTask] Failed to read all servos (error %d)%s, lowest input %u.%u V", res,
                          servo_read.link_error ? ", resetting UART" : "",
                          (unsigned) (servo_read.min_voltage_dv / 10U), (unsigned) (servo_read.min_voltage_dv % 10U));
 
-                if (servo_read.link_error) {
-                    // Wait 5ms for any pending servo responses from the BULK_READ/SYNC_READ
-                    // to arrive on the bus (18 servos may still be transmitting)
-                    osDelay(5);
+                // Whatever the error, servos may still be replying: let them finish before the
+                // goal write below (half duplex). What they send is cleared before the next request.
+                bus_quiet = servo_bus_wait_quiet();
 
+                if (servo_read.link_error) {
                     // Perform DMA recovery (mutex-protected)
                     bus_diag_event(BUS_EV_RESET_READ_FAIL, 1);
                     if (capture_now) {
@@ -3121,7 +3182,6 @@ void StartServoTask(void *argument)
                              (unsigned) capture.streak, (unsigned) res);
                     servo_bus_capture_probe();
                 }
-                // Damaged replies were read in full, the receiver is still in step
             };
 
             // B) Write new targets, once per set the controller publishes
@@ -3130,7 +3190,12 @@ void StartServoTask(void *argument)
             //    - A profile per joint (or the fixed one), see SERVO_PROFILE_MODE
             //    - Write the goals with their profile; the servos interpolate
             //    A failed write is repeated on the next tick
-            if (target_seq != written_seq || !goals_written) {
+            //    Never write onto a busy bus: the write waits for the next tick (T7.17)
+            const bool write_due = target_seq != written_seq || !goals_written;
+            if (write_due && !bus_quiet) {
+                bus_diag_event(BUS_EV_WR_SKIP_BUSY, 1);
+            }
+            if (write_due && bus_quiet) {
                 for (int i=0; i<6; i++) {
                     for (int j=0; j<3; j++) {
                         if (limit_alert_enabled) {
