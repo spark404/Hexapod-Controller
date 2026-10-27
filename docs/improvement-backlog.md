@@ -43,8 +43,8 @@ motion-profile work (T4.x) is specified in
 
 | Phase | Theme | Active items |
 |------:|-------|-------------:|
-| 1 | Foundations and safety | 14 (1 done, 1 moot) |
-| 2 | Servo bus and actuation | 11 (2 done) |
+| 1 | Foundations and safety | 15 (1 done, 1 moot) |
+| 2 | Servo bus and actuation | 12 (2 done) |
 | 3 | Command interface | 1 |
 | 4 | Frames, sensing and contact | 5 |
 | 5 | Motion core | 4 |
@@ -63,6 +63,7 @@ Key chains:  T1.6 ─► T7.2 (25 Hz), T7.5 (command)
              T7.5 (command) ─► T7.8 (twist) ─► T7.9 (gait) ─► T7.10 (lifecycle), T7.11 (ripple)
              T1.2 (fault) ─► T4.3, T7.10, T5.6
              T2.13 (clock) ─► T7.3 (2 Mbps)
+             T1.6 (log output) ─► T7.18 (log safety) ─► T7.17 (bus turnaround) ─► T7.19 (optional)
 ```
 
 ---
@@ -87,6 +88,16 @@ not assessed yet). The frames of the controller are analysed in
 [`frames-analysis.md`](frames-analysis.md) (T5.2, T7.8). The ROTATING state of the controller
 raised a fatal joint limit alert on the robot (see T7.5 and T7.8). The RGB LED task had never
 been created (FreeRTOS heap full) and its blink never worked; both are fixed, see T2.12.
+Updated 2026-10-17: the attitude estimate at rest is fixed (SPI2 at 5.25 MHz plus an accelerometer
+check, `cb34d25`, T5.2); the controller still ignores it. The servo read is 21 bytes and also
+returns the input voltage and temperature (T7.4).
+Updated 2026-10-26: the walking test of [`link-walking-test.md`](link-walking-test.md) ran twice
+(T7.5). The first run hit a servo bus lock-up that only a power cycle cleared (new item T7.17), the
+second passed. T7.17 step 1, a capture of the bus state when reads keep failing (`6c75cbc`), is
+built and host tested but not flashed yet. Nothing else changed status.
+Updated 2026-10-27: T7.17 steps 3 and 5 are done (host tested, not flashed); hypothesis 4 is
+ruled out. New item T7.18: the logging path is not thread safe and masks the servo bus
+interrupts. New optional item T7.19: read the servo replies straight from the DMA buffer.
 
 | Item | Phase | Status | Note |
 |------|:-----:|--------|------|
@@ -104,20 +115,22 @@ been created (FreeRTOS heap full) and its blink never worked; both are fixed, se
 | T4.3 | 1 | Open | Follows T1.2. |
 | T7.1 | 1 | Partial | New. Overruns are now counted (T7.12) and reported; re-anchoring `tick_count` is not done. |
 | T7.12 | 1 | Done | New. Servo bus diagnostics every 30 s (`34e582f`). |
+| T7.18 | 1 | Open | New, 2026-10-27. `printf` is not thread safe (shared stdout, `%f` allocates), the log sink disables all interrupts (holds off the servo bus turnaround, T7.17), and the servo loop logs every failed read. Narrower lock, own `vsnprintf` path, no `%f`, INFO by default, rate limits. |
 | T3.5 | 2 | Open | No related code. |
 | T4.1 | 2 | Partial | Implemented (`cb73897`): fixed profile with every goal, software interpolation removed. Ran on the robot on 2026-10-16 (stand-up, short walks, no write failures); the motion quality is not assessed. |
 | T4.2 | 2 | Partial | Implemented (`2fca015`): v and a per joint per goal, measured from the servo's Position Trajectory, acceleration floor 40 rad/s². `SERVO_PROFILE_MODE` switches back to the fixed profile. Ran on the robot on 2026-10-16 (writes 1.95 ms at about 10 Hz, no failures); the motion quality is not assessed, T factor and ramp not yet chosen from the E4 data. |
 | T7.2 | 2 | Open | New. |
 | T7.3 | 2 | Partial | New. Servos and `USART6` are at 2 Mbps (`d6c1be3`), set up by hand; no migration routine, Return Delay Time margin not measured. |
-| T7.4 | 2 | Done | New. Load, velocity and position are read in one Sync Read (now 18 bytes, see the item) and published (`f1f0a2c`). Verified on the robot: values and timing as expected, units confirmed by the bench experiment, byte stuffing fixed (library `0a49c5c`, 0 failures in 2,950 reads). Left over: the rare read timeout (about 1 per 3,000 cycles); it rose to 2-5 per 30 s when the SPI link started and went away with the interrupt priority change (T7.5). |
-| T7.17 | 2 | Open | New, 2026-10-26. The servo bus locked up once during the walking test: servo 0 stopped answering and the receiver was flooded; the UART reset did not clear it, only a power cycle did. Find the cause and add a recovery. |
+| T7.4 | 2 | Done | New. Load, velocity and position are read in one Sync Read (now 21 bytes with voltage and temperature, see the item) and published (`f1f0a2c`). Verified on the robot: values and timing as expected, units confirmed by the bench experiment, byte stuffing fixed (library `0a49c5c`, 0 failures in 2,950 reads). Left over: the rare read timeout (about 1 per 3,000 cycles); it rose to 2-5 per 30 s when the SPI link started and went away with the interrupt priority change (T7.5). |
+| T7.17 | 2 | Open | New, 2026-10-26. The servo bus locked up once during the walking test: servo 0 stopped answering and the receiver was flooded; the UART reset did not clear it, only a power cycle did. Find the cause and add a recovery. Step 1 (capture of the bus state, `6c75cbc`) is built and host tested; step 3 (drain snapshot) is done and rules out the receive-path race; step 5 (clear the receiver before each request, wait for a quiet bus before writing, measure the TX to RX turnaround) is done and host tested. None is flashed. Recovery (step 2) and reproduction (step 4) are open. |
+| T7.19 | 2 | Open | New, 2026-10-27, optional. Read the servo replies straight from the DMA buffer: no `rx_ring`, no byte-by-byte copies with the servo bus interrupt masked, 4 KB of RAM back. Only if T7.17 step 5 or T7.18 show long masked times. |
 | T7.16 | 2 | Open | New, next after T4.1/T4.2 are seen on the robot. Write the goals when the controller publishes, not on the next 50 Hz servo tick. |
 | T7.15 | 2 | Open | New, from the first bench data. A loaded leg lags its servo profile by ~100 ms and stops short of the goal: tune the position controller. |
 | T7.14 | 2 | Done | New. Bench experiment for the servo profile mode: all 103 runs on the robot, 2026-10-12. Result in [plan §6.3](servo-profile-bench-experiment.md): velocity-based computed profile if profiles are used, no sync benefit, servo lag is the issue (T7.15). |
 | T7.13 | 2 | Open | New, low priority. Byte stuffing in the library costs ~0.12 ms per bus transaction in the Debug build; do it in one pass. |
-| T7.5 | 3 | Partial | New. Slices 1 to 4 built and run on the robot: frames and CRC (`cmd_frame.c`), twist adapter with `T_LINK` (`command_adapter.c`), shared command state (`cmd_link.c`), 31-byte full-duplex SPI task in `main.c`, Pi side `SpiLink` in `poom-remote` at 200 kHz. Walk, stop, Poom out of range and daemon kill all stop the robot within 0.6 s. SPI1/USART1 interrupt priority 6 removed the servo 0 read timeouts. Open: walking test, heading lead fix, Poom firmware. Rotation blocked by a controller fault (rotate logic). The 7-byte frames of the old interface are gone. |
+| T7.5 | 3 | Partial | New. Slices 1 to 4 built and run on the robot: frames and CRC (`cmd_frame.c`), twist adapter with `T_LINK` (`command_adapter.c`), shared command state (`cmd_link.c`), 31-byte full-duplex SPI task in `main.c`, Pi side `SpiLink` in `poom-remote` at 200 kHz. Walk, stop, Poom out of range and daemon kill all stop the robot within 0.6 s. SPI1/USART1 interrupt priority 6 removed the servo 0 read timeouts. Walking test run on 2026-10-26: one run passed, one hit the servo bus lock-up of T7.17. Open: a clean repeat of the walking test (after T7.17), heading lead fix, Poom firmware. Rotation blocked by a controller fault (rotate logic). The 7-byte frames of the old interface are gone. |
 | T5.1 | 4 | Open | Reach radius is a fixed 40 mm. |
-| T5.2 | 4 | Open | `attitude` still discarded (`(void)attitude`), the caller passes zeros. The roll and pitch estimate itself was wrong at rest (accelerometer outliers from SPI2 at 21 MHz against a 10 MHz limit); gate added, clock fix pending. See the item and [`frames-analysis.md`](frames-analysis.md). |
+| T5.2 | 4 | Open | `attitude` still discarded (`(void)attitude`), the caller passes zeros. The roll and pitch estimate itself was wrong at rest (accelerometer outliers from SPI2 at 21 MHz against a 10 MHz limit); fixed in `cb34d25` (SPI2 at 5.25 MHz plus a gate), roll and pitch now 0.01 rad at rest. Open: attitude while walking, gyro offsets, the filter itself. See the item and [`frames-analysis.md`](frames-analysis.md). |
 | T5.3 | 4 | Open | Open-loop body pose integration. |
 | T7.6 | 4 | Open | New. |
 | T7.7 | 4 | Open | New. |
@@ -166,7 +179,7 @@ Independent of the new design and a prerequisite for most of it. Do these first,
   per-frame lines of the SPI task (one rate-limited warning instead) and the 25 s sensor
   lines, replaced by one `[Sensors]` line every 30 s together with the bus summary
   (`9f97ea9`).
-- Step 1 is open: the default `g_log_level` is still `LOG_LEVEL_DEBUG`.
+- Step 1 is open: the default `g_log_level` is still `LOG_LEVEL_DEBUG`; folded into T7.18 C.
 - The CPU figures under *Verify* need T2.12.
 
 **Do.**
@@ -185,6 +198,61 @@ Independent of the new design and a prerequisite for most of it. Do these first,
   well below the logging-induced ~57 %.
 - *Bench:* control tick period stays at its nominal value when the control rate
   is raised to 25 Hz.
+
+
+### T7.18 — Logging: thread safety and less impact on the timing
+
+**Phase 1.** Follows T1.6 (the non-blocking output). Protects the servo bus turnaround of T7.17.
+
+**Source:** review of the logging path, 2026-10-27.
+**Effort:** M for A–D (each S or XS); F is L.
+**Depends on:** T1.6 (done parts), T7.17 step 5 (the turnaround measurement shows the gain).
+
+**Finding.** A log line goes `LOG_x` → `printf` (newlib-nano) → `_write` → `log_sink_write` →
+ring buffer → USART1 DMA at 115200 baud. The output does not block, but:
+- *`printf` is not thread safe here.* `configUSE_NEWLIB_REENTRANT` is 0 and there are no newlib
+  lock hooks, so all tasks share one stdout `FILE`. `_isatty` returns 1, so stdout is line
+  buffered with a buffer from `malloc` on first use. Two tasks logging at once can garble the
+  buffer or corrupt the stdio state. `%f` goes through newlib's float conversion, which
+  allocates through the same shared state: concurrent float logging can corrupt the newlib
+  heap (a hard fault later, somewhere unrelated). There are 4 log calls with `%f`, among them
+  the joint limit alert in the servo task and the 12-float `[LOAD]` debug line.
+- *The sink lock disables all interrupts* (`__disable_irq` in `log_sink_port.c`), held for the
+  copy and for starting `HAL_UART_Transmit_DMA` (HAL at `-O0` in the Debug build: several us).
+  Meanwhile USART6 (priority 5) cannot switch the servo bus to receive: every log line from any
+  task eats into the 20 us turnaround budget of T7.17.
+- *Formatting runs in the caller*, also in the servo and control tasks, and the servo task
+  logs "Failed to read all servos" on every failed read: 50 lines per second during a lock-up.
+
+**Do.**
+- **A. Narrower lock.** Mask with `BASEPRI` at USART1's priority (6) instead of disabling all
+  interrupts, and start the DMA after releasing the lock (mark the transfer active inside the
+  lock, call `start_tx` outside). The servo bus interrupts (priority 5) are never masked by
+  logging. Extend `tests/log_sink_test.c`.
+- **B. Bypass stdio.** `log_printf` formats with `vsnprintf` into a buffer on the stack (about
+  160 B) and hands the line to `log_sink_write` in one call: no shared `FILE`, no `malloc`, one
+  locked copy per line. Replace the 4 `%f` logs with integers (mrad, 0.1 %). Check the stack
+  of every task that logs against the stack report (T2.12) first.
+- **C. Quiet by default.** Default level INFO (T1.6 step 1), and a compile-time
+  `LOG_COMPILE_LEVEL` so `LOG_DEBUG` expands to nothing where it is set above DEBUG.
+- **D. Rate-limit warnings in the servo loop.** Log the first failed read and then every Nth,
+  as `bus_capture` does; the `[Bus]` report counts all of them.
+- **E. Faster console** (115200 to 921600, if the Pi's UART and the capture script handle it):
+  8 times faster draining, far fewer dropped messages. A CubeMX setting (`MX_USART1_UART_Init`
+  is generated): to be changed by hand in CubeMX.
+- **F. Deferred logging, only if A–D are not enough.** The caller queues a pointer to the
+  format string and up to 4 integer arguments; a low-priority task formats them. About 1 us per
+  line for the caller; the arguments must be integers or constant strings.
+- **Measure:** the longest `log_sink_write` and formatting time (`DWT->CYCCNT`) and the longest
+  masked time per window, next to the turnaround in the `[Bus]` line.
+
+**Verify.**
+- *Static:* `tests/log_sink_test.c` for the lock and the late DMA start; a host test of
+  `log_printf` with a long line (cut off, still ends in `\r\n`).
+- *Bench:* two tasks logging in a tight loop for a minute: no garbled lines, no fault, the
+  heap figure of T2.12 unchanged. The turnaround maximum of T7.17 does not change with logging
+  on or off.
+- *Walk:* the walking test with the default level: no `[log] N message(s) dropped`.
 
 
 ### T2.12 — CPU, stack and heap instrumentation
@@ -953,14 +1021,21 @@ firmware noticed. After a power cycle of the MCU (GPIO22) the second run was cle
   first window of the onset).
 - The error codes cycle in a fixed pattern: 8 or 9 reads with 68 (`DNM_LL_ERR`, UART
   reset), 7 with 70 (no reset), one with 65, then 68 again; about 20 ms per read, so the
-  pattern repeats every 16 cycles. 70 is `DNM_RECV_ID_MISMATCH` (library `dynamixel_error.h`): a reply came
-  from a different servo than the one asked for. So replies did arrive, from servos
-  other than the one the Sync Read expected at that position; with servo 0 silent the
-  next servo answers into its slot.
-- **The receiver is flooded.** `rx dropped` is 733 kB in the 30 s window (24 kB/s): the
-  4,096-byte ring overflows in every cycle although a complete reply is only about 570 B.
-  Several kB arrive per cycle on a line that carries a ~570 B reply, with no UART
-  errors at all (`ore fe ne pe dma` all 0): valid frames at near line rate.
+  pattern repeats every 16 cycles. 70 is `DNM_RECV_ID_MISMATCH` (library `dynamixel_error.h`):
+  the packet at the read position was a complete status packet (valid header and CRC,
+  instruction 0x55) from another ID than the slot expected. So well-formed replies arrived,
+  but not in the expected order. *Correction (2026-10-27):* earlier text said that with
+  servo 0 silent the next servo answers into its slot. The Robotis documentation does not
+  say what a servo does when its predecessor stays silent in a Sync Read (Protocol 1.0 Bulk
+  Read: each device waits for the previous one's status packet), and a shift by one slot
+  would make every later slot fail with 70, about 40 % of the reads per servo instead of the
+  15 % logged. Extra packets in the receive ring in front of the replies fit better. The
+  received ID is not logged; the capture of step 1 shows the raw bytes.
+- **The receiver is flooded.** `rx dropped` is 733 kB in the 30 s window (24 kB/s, about
+  490 B per cycle): the 4,096-byte ring is full most of the time, although it is cleared
+  by the reset in 9 of 16 cycles and a complete reply is only about 570 B. More arrives
+  than the requests account for, with no UART errors at all (`ore fe ne pe dma` all 0):
+  valid frames.
 - Voltage 10.8 to 11.1 V and temperature 34 C throughout; no servo hardware alert
   (`servo alerts 0`); loop overruns 0; the SPI link and everything else were fine.
 - The UART reset sequence (stop DMA, flush, restart) was executed about 1,400 times per
@@ -971,10 +1046,25 @@ firmware noticed. After a power cycle of the MCU (GPIO22) the second run was cle
    after a bad packet, for example after a corrupted request or a late TX/RX switch, which
    also explains why a power cycle of the MCU, which re-runs `PERIF_Dynamixel_Configure`,
    cleared it (it re-sends return delay, operating mode and the rest to every servo).
+   Open: whether GPIO22 also cuts the servo power; if so, the power cycle does not tell a
+   servo state from an MCU state.
+   *Two ways the firmware itself could keep it going (found 2026-10-27, fixed in step 5):*
+   the receive ring was only cleared after a 68, so after a 70 extra packets stayed in
+   front of the next reply, and the ring overflowed until dropped bytes cut a packet (the
+   65 that ends each run of 70s). And the goal write follows the read in the same cycle:
+   after a 70 or 65 there was no wait, and a read that took an extra packet as a reply
+   returns while the last real reply is still on the line, so the write collided with it.
+   A colliding write is a corrupted request, the trigger this hypothesis needs.
 2. The first-reply race: with a 20 us return delay, the receiver is armed in the TX
    complete interrupt (`HAL_UART_TxCpltCallback`); an interrupt that holds off that
    callback longer than 20 us loses the start of servo 0's reply. This explains the
    background timeouts (only servo 0, 1 in 3,000), but not a permanent state.
+   USART6 has priority 5, the same as `configMAX_SYSCALL_INTERRUPT_PRIORITY`, so every
+   `taskENTER_CRITICAL` in any task holds that callback off; the longest known one is the
+   byte-by-byte copy in `uart_rx_drain_dma` (a full reply train, possibly hundreds of us in
+   the Debug build). Measured since step 5: the turnaround per window in the `[Bus]` line.
+   If it is too long: shorten the critical section that causes it, or raise the Return
+   Delay Time (register 9, 2 us units; 100 us costs about 1.4 ms per read).
 3. A wiring or connector fault at servo 0 (first in the chain): intermittent contact
    gives the background timeouts and, once, a stuck state. Check by a wiggle test and
    by reading the error counters of the bus when only servo 0 is connected.
@@ -983,9 +1073,20 @@ firmware noticed. After a power cycle of the MCU (GPIO22) the second run was cle
    stale bytes; each replay corrupts the next read, which triggers another reset. This
    could keep a failure going but does not explain several kB per cycle, so it is
    a contributor at most. Fix anyway.
+   *Checked against the code (2026-10-27): not reachable today.* The drain runs in
+   `usartRxTask`, the highest priority task (High4); the read index is set to 0 only by
+   the TX task (High3, before every transmit) and by `uart_rx_reset_dma` (servo task
+   High2, or `usartRxTask` itself), both under `uart_dma_mutex` and in a critical section.
+   No interrupt changes the read index, and the TX complete interrupt restarts the DMA
+   at index 0 after the TX task has already set the read index to 0. So the reset cannot
+   come between the snapshot and the drain. The snapshot is moved inside the critical
+   section anyway (step 3), so this holds if the priorities change. Hypothesis 4 is ruled out.
 
 **Status 2026-10-26:** step 1 is implemented (`bus_capture.c`, host test
 `tests/bus_capture_test.c`, in the servo task); not flashed yet. Steps 2 to 4 are open.
+**Status 2026-10-27:** step 3 is done (a safeguard; hypothesis 4 is ruled out by reading the
+code) and step 5 is done (bus hygiene and the turnaround measurement, host tested). Steps 2
+and 4 are open; steps 1, 3 and 5 are built but not flashed yet.
 
 **Do.**
 1. *Capture before the reset (done):* when a read fails with `DNM_LL_ERR` N times in a row
@@ -996,10 +1097,29 @@ firmware noticed. After a power cycle of the MCU (GPIO22) the second run was cle
    reboot servo 0 (instruction 0x08) if it is still silent, and raise the fault to the
    controller (T1.2) if that does not help within a second. Never keep walking on reads
    that are 100 % stale: publish a `servo_read_ok` age so the controller can stop.
-3. *Race fix:* snapshot the write index inside the critical section in
-   `uart_rx_drain_dma`; keep the reset and the drain mutually exclusive.
+3. *Race fix (done 2026-10-27):* snapshot the write index inside the critical section in
+   `uart_rx_drain_dma`. The reset and the drain were already mutually exclusive (see
+   hypothesis 4), so this is a safeguard, not a fix of the lock-up.
 4. *Reproduce:* repeat the walking test a few times, and a long standing test (an hour),
    to see how often it happens. With the capture from step 1 in place, one event is enough.
+5. *Bus hygiene and turnaround (done 2026-10-27):*
+   - The TX task clears the receive ring (and the bytes the DMA had not handed over yet)
+     before every request: nothing received before a request can be a reply to it. The
+     bytes are counted as `rx stale` in the `[Bus] io` line; 0 in normal running, during an
+     event it measures the extra traffic directly.
+   - After any read that did not end cleanly (any code, not only 68 and 69), the servo task
+     waits until no byte has arrived for 1 ms, at most 6 ms (`servo_bus_wait_quiet`), before
+     the goal write; this replaces the fixed `osDelay(5)` that only ran after 68 and 69.
+     If the line does not go quiet, the write is skipped for that cycle and repeated on
+     the next (`wr skipped busy`): never write onto a busy bus. Valid slots of a failed
+     read are kept (`servo_read_t.valid`).
+   - The turnaround from the end of each transmit to the receiver armed is measured with
+     `DWT->CYCCNT`: start taken right after the TX DMA is started, minus the bytes on the
+     wire (10 bits each), up to the end of `HAL_UART_TxCpltCallback`. Reported per window
+     as `turnaround us min/avg/max slow N` in the `[Bus]` line, slow meaning above 15 us
+     (`BUS_DIAG_TURNAROUND_LIMIT_US`, 5 us margin to the 20 us Return Delay Time).
+     Within about 1 us; check once with a scope (a GPIO pulse at the end of the callback
+     against the data line).
 
 **Verify.**
 - *Bench:* force the failure (pull and reconnect the data line of servo 0 while the
@@ -1007,9 +1127,54 @@ firmware noticed. After a power cycle of the MCU (GPIO22) the second run was cle
   fault; no silent stale walking.
 - *Walk:* the walking test passes five times in a row with the report's FAIL criteria
   unchanged.
+- *Bench (step 5):* `rx stale 0` and `wr skipped busy 0` at rest and while walking; the
+  turnaround maximum below 15 us; the scope check of the turnaround estimate.
 
 **Left from the test.** The report tool now reads the windows without any good read
 (`rd 1500 ok 0 (us -)`); before, it skipped them and called the run INCONCLUSIVE.
+
+
+### T7.19 — Read the servo replies straight from the DMA buffer (optional)
+
+**Phase 2.** Optional: do it when the measurements of T7.17 step 5 or T7.18 show long masked
+times, or when the 4 KB of RAM are needed.
+
+**Source:** review of `uart_rx_drain_dma`, 2026-10-27.
+**Effort:** M.
+**Depends on:** T7.17 step 5 (the turnaround and stale-byte counters to compare against).
+
+**Finding.** Every received byte is copied twice: the drain (`usartRxTask`) copies it from
+`dma_rx_buf` into `rx_ring` with `ringbuf_push`, one byte at a time with a `%` by a run-time
+size, and `usart_read` copies it again into the library's buffer with `ringbuf_read`, also byte
+by byte. Both copies run inside `taskENTER_CRITICAL`, which masks priority 5: for a full reply
+train (about 570 B) an estimated 250 to 400 us in the Debug build during which the USART6
+interrupt cannot switch the bus to receive (T7.17 hypothesis 2). Double buffering (the DMA
+`DBM` mode) does not help: the circular buffer with half and full transfer interrupts is
+already two halves, and the copy would stay; with short packets of variable length, ended by
+an idle line, it only adds bookkeeping.
+
+**Do.**
+1. Make `dma_rx_buf` the ring and drop `rx_ring` (4 KB of RAM, 82.9 % to about 79 %). The DMA
+   moves the write position (NDTR), `usart_read` the read position: snapshot the DMA position
+   (one register read), copy at most two contiguous pieces with `memcpy`, advance the read
+   position. The receive task copies nothing; on half, full or idle it only wakes the reader.
+2. The buffer is reset before every request (T7.17 step 5), and a full reply train is at most
+   about 760 B with stuffing against 1,024 B, so a normal transaction cannot lap it. Detect a
+   lap (a flood) by counting buffer wraps against the read position; that is a cleaner flood
+   measure than `rx dropped` and replaces it.
+3. Rework with it: `usart_read`, the drain, `uart_rx_flush_dma`, the stale count in the TX task
+   and `servo_bus_capture_ring`. Put the index logic in a small module without HAL (like
+   `bus_capture.c`) with a host test: wrap-around, reset before a request, a lap.
+4. Alternative with less change and less gain: keep `rx_ring`, give it a power-of-two size and
+   a mask, copy with `memcpy` in bulk, and make it lock-free for its one producer and one
+   consumer (each side writes only its own index; clearing becomes read position = write
+   position). `ring_buffer.c` has other users; check them first.
+
+**Verify.**
+- *Static:* the host test of the index logic; the `bus_diag` and `bus_capture` tests unchanged.
+- *Bench:* read time and the turnaround of T7.17 step 5 equal or better; `rx stale 0`; no
+  failed reads at rest over 10 minutes.
+- *Walk:* the walking test passes with the report's criteria unchanged.
 
 ---
 
@@ -1061,7 +1226,7 @@ The Pi-facing protocol: one atomic command, CRC, status reply and link supervisi
   releasing it leaves a rotation to catch up. Bounding the heading lead to the actual yaw
   fixes it; bundle it with the next firmware change.
 
-Open: the walking test with the bus diagnostics (saved, not yet run: [`link-walking-test.md`](link-walking-test.md)), the Poom firmware, the heading lead fix. Stop
+Open: a clean repeat of the walking test with the bus diagnostics ([`link-walking-test.md`](link-walking-test.md); the first run on 2026-10-26 hit a servo bus lock-up, T7.17, the second passed), the Poom firmware, the heading lead fix. Stop
 the `poom-remote` service when flashing, the bootloader shares the SPI bus.
 
 **Do.**
@@ -1377,7 +1542,7 @@ re-grouped).
 | Time available | Pick from |
 |----------------|-----------|
 | 30 min on the couch | Phase 1 hygiene (T2.3, T2.5, T2.6, T2.9), T7.1 |
-| One evening | A single Phase 1 item (T1.6, T2.12, T1.2, T2.13) |
+| One evening | A single Phase 1 item (T1.6, T7.18, T2.12, T1.2, T2.13) |
 | A weekend | One Phase 2 item (T7.15, T4.1, T7.3) or T7.5 |
 | A focused week | T4.1 + T4.2, or T7.6 (contact), or T7.5 + the Pi test sender |
 | A long break | The motion core: T7.8 + T7.9 + T7.10, with T7.7 first so it can be verified in sim |

@@ -1,9 +1,9 @@
 # Walking test with the bus diagnostics
 
-A saved test for later: does the servo bus stay clean while the robot walks with the SPI link
+A saved test: does the servo bus stay clean while the robot walks with the SPI link
 running? It is the open item of backlog T7.5 ("walking test with the bus diagnostics") and the
-follow-up of the interrupt priority change `327a4d3`. Nothing here has been run on the robot yet; the
-tools were checked against the logs captured on 2026-10-16.
+follow-up of the interrupt priority change `327a4d3`. The tools were checked against the logs
+captured on 2026-10-16; the test was first run on 2026-10-26, see [Results](#results-2026-10-26).
 
 ## What it answers
 
@@ -89,7 +89,26 @@ roll or pitch is more than 3 degrees from level, and with the number of rejected
 | link running, SPI1 and USART1 at priority 6, standing | 4 | 1, 0, 0, 0 (5,950 reads) |
 | link running, SPI2 at 5.25 MHz, standing (2026-10-17) | 4 | 1, 0, 0, 0 (4,835 reads); roll and pitch 0.6 deg, 0 of 378 accelerometer samples rejected per window, 11.0 to 11.1 V, 37 to 38 C |
 
-Read time 4.5 ms (18 bytes per servo), write time 1.95 ms, no loop overruns in the clean windows.
+Read time 4.5 ms (18 bytes per servo; 21 bytes and about 0.27 ms more since 2026-10-17, with the
+voltage and temperature), write time 1.95 ms, no loop overruns in the clean windows.
+
+## Results (2026-10-26)
+
+Two runs (`link-walk-20261026-193620` and the run after it).
+
+- **Run 1: servo bus lock-up.** 80 s clean (6 servo 0 timeouts in 3,000 reads), then every read
+  failed for the remaining 130 s: servo 0 missing in every read, servos 1 to 17 in about 15 %, the
+  receiver flooded (733 kB dropped per 30 s window) with no UART errors. Writes kept succeeding, so
+  the robot walked on stale joint angles; nothing in the firmware noticed. Only a power cycle of the
+  MCU cleared it. Evidence, hypotheses and plan: backlog T7.17.
+- **Run 2, after the power cycle: PASS.** 2 failed reads in 10,500.
+
+Before repeating the test, flash the capture of T7.17 step 1 (`bus_capture.c`, commit `6c75cbc`) so
+that a next lock-up logs the bus state. Since T7.17 step 5 the `[Bus]` line also ends with
+`turnaround us min/avg/max slow N` (transmit to receiver armed, should stay below 15 us), and the
+`[Bus] io` line reports `rx stale` (bytes cleared before a request, should be 0) and `wr skipped busy`
+(goal writes held back because the bus did not go quiet). The report tool does not judge these yet;
+read them from the console log.
 
 ## Files
 
